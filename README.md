@@ -47,9 +47,11 @@ Higher-level interpretation, such as line-item detection or sales-document parsi
 
 The repository intentionally ignores sensitive customer PDFs.
 
-- Unit tests cover the public API without needing private documents.
-- Integration tests use a generated synthetic PDF.
-- Additional real-world fixtures can later be added as official non-sensitive examples.
+- PHPUnit covers the public API directly.
+- Synthetic multi-page PDFs cover real `xtract` behavior without needing customer documents.
+- Corpus tests discover every `*.pdf` below `tests/Fixtures/` automatically and load sibling `*.expected.json` files.
+- Private local fixtures belong in `tests/Fixtures/private/` and stay unversioned.
+- Future official examples can be committed in `tests/Fixtures/public/`.
 
 Run:
 

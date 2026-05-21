@@ -3,7 +3,9 @@
 /composer.lock
 /out/
 /tmp/
-/tests/fixtures/private/**/*.pdf
-/tests/fixtures/private/
-/examples/private/**/*.pdf
-/examples/private/
+/tests/Fixtures/private/*
+!/tests/Fixtures/private/.gitkeep
+!/tests/Fixtures/private/README.md
+/examples/private/*
+!/examples/private/.gitkeep
+!/examples/private/README.md
