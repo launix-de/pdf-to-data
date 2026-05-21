@@ -1,0 +1,9 @@
+/vendor/
+/.phpunit.cache/
+/composer.lock
+/out/
+/tmp/
+/tests/fixtures/private/**/*.pdf
+/tests/fixtures/private/
+/examples/private/**/*.pdf
+/examples/private/

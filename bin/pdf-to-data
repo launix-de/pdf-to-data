@@ -1,0 +1,30 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/vendor/autoload.php';
+
+use Launix\PdfToData\PdfReader;
+
+$command = $argv[1] ?? null;
+$input = $argv[2] ?? null;
+
+if (!in_array($command, ['remove-footers', 'extract-elements', 'extract-sales-document'], true) || !is_string($input) || $input === '') {
+    fwrite(STDERR, "Usage: pdf-to-data <remove-footers|extract-elements|extract-sales-document> <file.pdf>\n");
+    exit(1);
+}
+
+$reader = PdfReader::fromFile($input);
+
+if ($command === 'remove-footers') {
+    echo json_encode($reader->removeFooters()->toArray(), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+    exit(0);
+}
+
+if ($command === 'extract-elements') {
+    echo json_encode($reader->extractElements(), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
+    exit(0);
+}
+
+echo json_encode($reader->extractSalesDocument(), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n";
