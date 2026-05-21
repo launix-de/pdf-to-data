@@ -2,6 +2,7 @@
   "name": "launix-de/pdf-to-data",
   "description": "Reusable PDF extraction library for normalized HTML, positioned elements, and sales-document parsing.",
   "type": "library",
+  "license": "GPL-3.0-or-later",
   "require": {
     "php": "^8.1",
     "ext-json": "*",
