@@ -138,6 +138,23 @@ function pdfRgbArrayToHex(array $rgb): string
 }
 
 /**
+ * Convert normalised CMYK components (0..1) to a CSS hex colour string.
+ */
+function pdfCmykArrayToHex(array $cmyk): string
+{
+    $c = max(0.0, min(1.0, (float)($cmyk[0] ?? 0.0)));
+    $m = max(0.0, min(1.0, (float)($cmyk[1] ?? 0.0)));
+    $y = max(0.0, min(1.0, (float)($cmyk[2] ?? 0.0)));
+    $k = max(0.0, min(1.0, (float)($cmyk[3] ?? 0.0)));
+
+    $r = (int)round(255.0 * (1.0 - $c) * (1.0 - $k));
+    $g = (int)round(255.0 * (1.0 - $m) * (1.0 - $k));
+    $b = (int)round(255.0 * (1.0 - $y) * (1.0 - $k));
+
+    return sprintf('#%02x%02x%02x', $r, $g, $b);
+}
+
+/**
  * Build a PNG stream from raw pixel data (8bpc, DeviceGray or DeviceRGB).
  */
 function makePng(int $width, int $height, int $channels, int $bitsPerComponent, string $rawPixelData): string
@@ -161,6 +178,154 @@ function makePng(int $width, int $height, int $channels, int $bitsPerComponent, 
     $ihdr = pack('NNCCCCC', $width, $height, $bitsPerComponent, $channels === 1 ? 0 : 2, 0, 0, 0);
 
     return $signature . $chunk('IHDR', $ihdr) . $chunk('IDAT', $compressed) . $chunk('IEND', '');
+}
+
+/**
+ * Convert an embedded PDF image into a browser-friendly data URI.
+ *
+ * Browsers are unreliable for CMYK JPEGs. We normalize those to RGB PNG so the generated HTML
+ * matches the PDF visually instead of depending on viewer-specific colour handling.
+ *
+ * @param array<string,mixed> $details
+ */
+function makeDisplayImageDataUri(string $mime, string $content, array $details = []): ?string
+{
+    if ($content === '') {
+        return null;
+    }
+
+    $channels = channelsFromColorSpace($details['ColorSpace'] ?? '', 3);
+    $isCmykLike = $channels === 4;
+
+    if ($mime === 'image/jpeg' && $isCmykLike) {
+        try {
+            if (class_exists('Imagick')) {
+                $image = new \Imagick();
+                $image->readImageBlob($content);
+                $image->transformImageColorspace(\Imagick::COLORSPACE_SRGB);
+                $image->setImageFormat('png');
+                return 'data:image/png;base64,' . base64_encode((string)$image->getImagesBlob());
+            }
+        } catch (\Throwable $e) {
+            // fall through to raw data URI below
+        }
+    }
+
+    return 'data:' . $mime . ';base64,' . base64_encode($content);
+}
+
+/**
+ * Decode PNG/TIFF predictor bytes used by Flate/LZW-compressed PDF image streams.
+ *
+ * @param mixed $decodeParams Raw DecodeParms entry from the PDF dictionary.
+ */
+function decodePredictorData(string $raw, $decodeParams, int $width, int $channels, int $bitsPerComponent = 8): string
+{
+    if ($raw === '' || $width <= 0 || $channels <= 0 || $bitsPerComponent <= 0) {
+        return $raw;
+    }
+
+    $params = [];
+    if (is_array($decodeParams)) {
+        $params = $decodeParams;
+    } elseif (is_object($decodeParams)) {
+        $params = (array)$decodeParams;
+    }
+
+    $predictor = (int)($params['Predictor'] ?? $params['P'] ?? 1);
+    if ($predictor <= 1) {
+        return $raw;
+    }
+
+    $colors = max(1, (int)($params['Colors'] ?? $params['C'] ?? $channels));
+    $bits = max(1, (int)($params['BitsPerComponent'] ?? $params['BPC'] ?? $bitsPerComponent));
+    $columns = max(1, (int)($params['Columns'] ?? $params['Cols'] ?? $width));
+    $bytesPerPixel = max(1, (int)ceil(($colors * $bits) / 8));
+    $rowBytes = max(1, (int)ceil(($columns * $colors * $bits) / 8));
+
+    if ($predictor === 2) {
+        if ($bits !== 8) {
+            return $raw;
+        }
+        $decoded = '';
+        $length = strlen($raw);
+        for ($offset = 0; $offset + $rowBytes <= $length; $offset += $rowBytes) {
+            $row = substr($raw, $offset, $rowBytes);
+            $out = $row;
+            for ($i = $bytesPerPixel; $i < $rowBytes; $i++) {
+                $out[$i] = chr((ord($out[$i]) + ord($out[$i - $bytesPerPixel])) & 0xff);
+            }
+            $decoded .= $out;
+        }
+        return $decoded;
+    }
+
+    if ($predictor < 10 || $predictor > 15 || $bits !== 8) {
+        return $raw;
+    }
+
+    $decoded = '';
+    $prev = str_repeat("\x00", $rowBytes);
+    $length = strlen($raw);
+
+    for ($offset = 0; $offset < $length;) {
+        $filter = ord($raw[$offset]);
+        $offset++;
+        if ($offset + $rowBytes > $length) {
+            break;
+        }
+
+        $row = substr($raw, $offset, $rowBytes);
+        $offset += $rowBytes;
+        $out = $row;
+
+        switch ($filter) {
+            case 0:
+                break;
+
+            case 1:
+                for ($i = $bytesPerPixel; $i < $rowBytes; $i++) {
+                    $out[$i] = chr((ord($row[$i]) + ord($out[$i - $bytesPerPixel])) & 0xff);
+                }
+                break;
+
+            case 2:
+                for ($i = 0; $i < $rowBytes; $i++) {
+                    $out[$i] = chr((ord($row[$i]) + ord($prev[$i])) & 0xff);
+                }
+                break;
+
+            case 3:
+                for ($i = 0; $i < $rowBytes; $i++) {
+                    $left = $i >= $bytesPerPixel ? ord($out[$i - $bytesPerPixel]) : 0;
+                    $up = ord($prev[$i]);
+                    $out[$i] = chr((ord($row[$i]) + intdiv($left + $up, 2)) & 0xff);
+                }
+                break;
+
+            case 4:
+                for ($i = 0; $i < $rowBytes; $i++) {
+                    $a = $i >= $bytesPerPixel ? ord($out[$i - $bytesPerPixel]) : 0;
+                    $b = ord($prev[$i]);
+                    $c = $i >= $bytesPerPixel ? ord($prev[$i - $bytesPerPixel]) : 0;
+                    $p = $a + $b - $c;
+                    $pa = abs($p - $a);
+                    $pb = abs($p - $b);
+                    $pc = abs($p - $c);
+                    $predict = ($pa <= $pb && $pa <= $pc) ? $a : (($pb <= $pc) ? $b : $c);
+                    $out[$i] = chr((ord($row[$i]) + $predict) & 0xff);
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        $decoded .= $out;
+        $prev = $out;
+    }
+
+    return $decoded !== '' ? $decoded : $raw;
 }
 
 /**
@@ -546,6 +711,20 @@ function renderFormToSvg(XObjectForm $form): array
                     }
                     break;
 
+                case 'K':
+                    $values = preg_split('/\s+/', trim((string)($command['c'] ?? '')));
+                    if (count($values) >= 4) {
+                        $stroke = pdfCmykArrayToHex([(float)$values[0], (float)$values[1], (float)$values[2], (float)$values[3]]);
+                    }
+                    break;
+
+                case 'k':
+                    $values = preg_split('/\s+/', trim((string)($command['c'] ?? '')));
+                    if (count($values) >= 4) {
+                        $fill = pdfCmykArrayToHex([(float)$values[0], (float)$values[1], (float)$values[2], (float)$values[3]]);
+                    }
+                    break;
+
                 case 'G':
                     $gray = (float)trim((string)($command['c'] ?? ''));
                     $stroke = pdfRgbArrayToHex([$gray, $gray, $gray]);
@@ -642,17 +821,26 @@ function renderFormToSvg(XObjectForm $form): array
                             $bits = (int)($detailsImage['BitsPerComponent'] ?? 8);
 
                             if (stripos((string)$filterValue, 'DCTDecode') !== false) {
-                                $dataUri = 'data:image/jpeg;base64,' . base64_encode($xObject->getContent());
+                                $content = $xObject->getContent();
+                                if (is_string($content) && $content !== '') {
+                                    $dataUri = makeDisplayImageDataUri('image/jpeg', $content, $detailsImage);
+                                }
                             } elseif (stripos((string)$filterValue, 'JPXDecode') !== false) {
                                 $dataUri = 'data:image/jp2;base64,' . base64_encode($xObject->getContent());
                             } elseif (stripos((string)$filterValue, 'FlateDecode') !== false && $widthImage > 0 && $heightImage > 0 && $bits === 8) {
-                                $channels = ($colorSpace === 'DeviceGray') ? 1 : (($colorSpace === 'DeviceRGB') ? 3 : 0);
+                                $channels = channelsFromColorSpace($colorSpace, 0);
                                 if ($channels > 0) {
                                     $raw = $xObject->getContent();
                                     if (is_string($raw)) {
+                                        $raw = decodePredictorData($raw, $detailsImage['DecodeParms'] ?? null, $widthImage, $channels, $bits);
                                         $expected = $widthImage * $heightImage * $channels;
                                         if (strlen($raw) >= $expected) {
-                                            $png = makePng($widthImage, $heightImage, $channels, $bits, substr($raw, 0, $expected));
+                                            $pixels = substr($raw, 0, $expected);
+                                            if ($channels === 4) {
+                                                $pixels = cmyk8ToRgb8($pixels, $widthImage, $heightImage);
+                                                $channels = 3;
+                                            }
+                                            $png = makePng($widthImage, $heightImage, $channels, $bits, $pixels);
                                             $dataUri = 'data:image/png;base64,' . base64_encode($png);
                                         }
                                     }
@@ -874,6 +1062,8 @@ function renderPageVectorsToSvg(Page $page): ?string
             case 'w': if (count($nums)>=1){ $lineWidth=(float)array_pop($nums);} $nums=[]; break;
             case 'RG': if(count($nums)>=3){ $v=array_slice($nums,-3); $stroke=pdfRgbArrayToHex([$v[0],$v[1],$v[2]]);} $nums=[]; break;
             case 'rg': if(count($nums)>=3){ $v=array_slice($nums,-3); $fill=pdfRgbArrayToHex([$v[0],$v[1],$v[2]]);} $nums=[]; break;
+            case 'K': if(count($nums)>=4){ $v=array_slice($nums,-4); $stroke=pdfCmykArrayToHex([$v[0],$v[1],$v[2],$v[3]]);} $nums=[]; break;
+            case 'k': if(count($nums)>=4){ $v=array_slice($nums,-4); $fill=pdfCmykArrayToHex([$v[0],$v[1],$v[2],$v[3]]);} $nums=[]; break;
             case 'G': if(count($nums)>=1){ $g=(float)array_pop($nums); $stroke=pdfRgbArrayToHex([$g,$g,$g]);} $nums=[]; break;
             case 'g': if(count($nums)>=1){ $g=(float)array_pop($nums); $fill=pdfRgbArrayToHex([$g,$g,$g]);} $nums=[]; break;
             case 'm': if(count($nums)>=2){ $v=array_slice($nums,-2); $nums=[]; [$X,$Y]=pdfMatrixApply($ctm,(float)$v[0],(float)$v[1]); $path[]=['op'=>'M','x'=>$X,'y'=>$Y]; } else { $nums=[]; } break;
@@ -985,6 +1175,8 @@ function extractPageVectorClusters(Page $page): array
             case 'w': if(count($nums)>=1){ $lineWidth=(float)array_pop($nums);} $nums=[]; break;
             case 'RG': if(count($nums)>=3){ $v=array_slice($nums,-3); $stroke=pdfRgbArrayToHex([$v[0],$v[1],$v[2]]);} $nums=[]; break;
             case 'rg': if(count($nums)>=3){ $v=array_slice($nums,-3); $fill=pdfRgbArrayToHex([$v[0],$v[1],$v[2]]);} $nums=[]; break;
+            case 'K': if(count($nums)>=4){ $v=array_slice($nums,-4); $stroke=pdfCmykArrayToHex([$v[0],$v[1],$v[2],$v[3]]);} $nums=[]; break;
+            case 'k': if(count($nums)>=4){ $v=array_slice($nums,-4); $fill=pdfCmykArrayToHex([$v[0],$v[1],$v[2],$v[3]]);} $nums=[]; break;
             case 'G': if(count($nums)>=1){ $g=(float)array_pop($nums); $stroke=pdfRgbArrayToHex([$g,$g,$g]);} $nums=[]; break;
             case 'g': if(count($nums)>=1){ $g=(float)array_pop($nums); $fill=pdfRgbArrayToHex([$g,$g,$g]);} $nums=[]; break;
             case 'm': if(count($nums)>=2){ $v=array_slice($nums,-2); $nums=[]; [$X,$Y]=pdfMatrixApply($ctm,$v[0],$v[1]); $path[]=['op'=>'M','x'=>$X,'y'=>$Y]; $add_point($X,$Y);} else {$nums=[];} break;
@@ -1302,7 +1494,12 @@ try {
                                 try { if ($xo->has('Filter')) { $filterVal = (string)$xo->get('Filter'); } } catch (\Throwable $e) {}
                                 $mime = detectMimeFromFilter($filterVal);
                                 if ($mime) {
-                                    try { $content = $xo->getContent(); if ($content !== null && $content !== '') { $dataUri = 'data:'.$mime.';base64,'.base64_encode($content); } } catch (\Throwable $e) {}
+                                try {
+                                    $content = $xo->getContent();
+                                    if (is_string($content) && $content !== '') {
+                                        $dataUri = makeDisplayImageDataUri($mime, $content, $det);
+                                    }
+                                } catch (\Throwable $e) {}
                                 } elseif (is_string($filterVal) && stripos($filterVal, 'FlateDecode') !== false) {
                                     try {
                                         $detInner = $xo->getDetails(true);
@@ -1311,10 +1508,13 @@ try {
                                         $w = (int)($detInner['Width'] ?? 0); $h = (int)($detInner['Height'] ?? 0);
                                         $bpc = (int)($detInner['BitsPerComponent'] ?? 8);
                                         if ($w > 0 && $h > 0 && $bpc === 8 && $channels > 0) {
-                                            $raw = $xo->getContent();
-                                            $expected = $w * $h * $channels;
-                                            if (is_string($raw) && strlen($raw) >= $expected) {
-                                                $pix = substr($raw, 0, $expected);
+                                        $raw = $xo->getContent();
+                                        if (is_string($raw)) {
+                                            $raw = decodePredictorData($raw, $detInner['DecodeParms'] ?? null, $w, $channels, $bpc);
+                                        }
+                                        $expected = $w * $h * $channels;
+                                        if (is_string($raw) && strlen($raw) >= $expected) {
+                                            $pix = substr($raw, 0, $expected);
                                                 if ($channels === 4) { $pix = cmyk8ToRgb8($pix, $w, $h); $channels = 3; }
                                                 $png = makePng($w, $h, $channels, $bpc, $pix);
                                                 $dataUri = 'data:image/png;base64,' . base64_encode($png);
@@ -1334,6 +1534,7 @@ try {
                                             if ($mbpc === 8 && $mw > 0 && $mh > 0) {
                                                 $mraw = $sm->getContent();
                                                 if (is_string($mraw)) {
+                                                    $mraw = decodePredictorData($mraw, $detm['DecodeParms'] ?? null, $mw, 1, $mbpc);
                                                     $expectedM = $mw * $mh;
                                                     if (strlen($mraw) >= $expectedM) {
                                                         $maskPng = makePng($mw, $mh, 1, 8, substr($mraw, 0, $expectedM));
@@ -1394,7 +1595,12 @@ try {
                             try { if ($xobj->has('Filter')) { $filterVal = (string)$xobj->get('Filter'); } } catch (\Throwable $e) {}
                             $mime = detectMimeFromFilter($filterVal);
                             if ($mime) {
-                                try { $content = $xobj->getContent(); if ($content !== null && $content !== '') { $dataUri = 'data:'.$mime.';base64,'.base64_encode($content); } } catch (\Throwable $e) {}
+                                try {
+                                    $content = $xobj->getContent();
+                                    if (is_string($content) && $content !== '') {
+                                        $dataUri = makeDisplayImageDataUri($mime, $content, $det);
+                                    }
+                                } catch (\Throwable $e) {}
                             } elseif (is_string($filterVal) && stripos($filterVal, 'FlateDecode') !== false) {
                                 // Attempt to build PNG from flate-compressed pixel data (DeviceGray/DeviceRGB 8bpc)
                                 try {
@@ -1405,6 +1611,9 @@ try {
                                     $bpc = (int)($det['BitsPerComponent'] ?? 8);
                                     if ($w > 0 && $h > 0 && $bpc === 8 && $channels > 0) {
                                         $raw = $xobj->getContent();
+                                        if (is_string($raw)) {
+                                            $raw = decodePredictorData($raw, $det['DecodeParms'] ?? null, $w, $channels, $bpc);
+                                        }
                                         $expected = $w * $h * $channels;
                                         if (is_string($raw) && strlen($raw) >= $expected) {
                                             $pix = substr($raw, 0, $expected);
@@ -1440,6 +1649,7 @@ try {
                                             // If mask is Flate-encoded raw gray, build PNG
                                             $channelsM = 1; // SMask is gray
                                             if (is_string($mraw)) {
+                                                $mraw = decodePredictorData($mraw, $detm['DecodeParms'] ?? null, $mw, $channelsM, $mbpc);
                                                 $expectedM = $mw * $mh * $channelsM;
                                                 if (strlen($mraw) >= $expectedM) {
                                                     $bytes = substr($mraw, 0, $expectedM);
@@ -1568,6 +1778,7 @@ try {
                                         $raw = @zlib_decode($data);
                                         if ($raw === false || $raw === null) { $raw = @gzuncompress($data); }
                                         if ($w > 0 && $h > 0 && $channels > 0 && $bpc === 8 && $raw) {
+                                            $raw = decodePredictorData($raw, $dict['DecodeParms'] ?? null, $w, $channels, $bpc);
                                             $expected = $w * $h * $channels;
                                             if (strlen($raw) >= $expected) {
                                                 $pix = substr($raw, 0, $expected);
@@ -2700,6 +2911,123 @@ try {
             $adjustedItems[] = $item;
         }
         $jsonItems = $adjustedItems;
+        usort($jsonItems, static function (array $a, array $b): int {
+            $pa = (int)($a['page_index'] ?? 0);
+            $pb = (int)($b['page_index'] ?? 0);
+            if ($pa !== $pb) return $pa <=> $pb;
+            $ta = (float)($a['top'] ?? 0.0);
+            $tb = (float)($b['top'] ?? 0.0);
+            if (abs($ta - $tb) > 0.5) return $ta <=> $tb;
+            $la = (float)($a['left'] ?? $a['x'] ?? 0.0);
+            $lb = (float)($b['left'] ?? $b['x'] ?? 0.0);
+            if (abs($la - $lb) > 0.01) return $la <=> $lb;
+            return strcmp((string)($a['type'] ?? ''), (string)($b['type'] ?? ''));
+        });
+        foreach ($jsonItems as $idx => &$jsonItem) {
+            $jsonItem['stream_index'] = $idx;
+        }
+        unset($jsonItem);
+    }
+
+    $contentTrimTop = array_fill(0, $pageCount, 0.0);
+    $contentTrimBottom = array_fill(0, $pageCount, 0.0);
+    $pageHasContent = array_fill(0, $pageCount, false);
+    $pageContentTop = array_fill(0, $pageCount, INF);
+    $pageContentBottom = array_fill(0, $pageCount, 0.0);
+
+    foreach ($jsonItems as $item) {
+        $pi = (int)($item['page_index'] ?? -1);
+        if ($pi < 0 || !isset($pageMeta[$pi])) {
+            continue;
+        }
+        if (($item['type'] ?? '') === 'line') {
+            continue;
+        }
+        if (($item['type'] ?? '') === 'text' && trim((string)($item['text'] ?? '')) === '') {
+            continue;
+        }
+        $offsetTop = (float)($pageMeta[$pi]['offset_top'] ?? 0.0);
+        $localTop = (float)($item['top'] ?? 0.0) - $offsetTop;
+        $boxHeight = ($item['type'] ?? '') === 'text'
+            ? max(0.0, (float)($item['font_size'] ?? 0.0))
+            : max(0.0, (float)($item['height'] ?? 0.0));
+        $boxWidth = ($item['type'] ?? '') === 'text'
+            ? max(0.0, (float)mb_strlen((string)($item['text'] ?? ''), 'UTF-8'))
+            : max(0.0, (float)($item['width'] ?? 0.0));
+        if (($item['type'] ?? '') === 'image' && ($boxWidth <= 2.0 || $boxHeight <= 2.0)) {
+            continue;
+        }
+        $localBottom = $localTop + $boxHeight;
+        $pageHasContent[$pi] = true;
+        $pageContentTop[$pi] = min($pageContentTop[$pi], $localTop);
+        $pageContentBottom[$pi] = max($pageContentBottom[$pi], $localBottom);
+    }
+
+    $needsContentCompaction = false;
+    for ($pi = 0; $pi < $pageCount; $pi++) {
+        if (!$pageHasContent[$pi]) {
+            continue;
+        }
+        $contentHeight = (float)($pageMeta[$pi]['content_height'] ?? 0.0);
+        $topTrim = max(0.0, min($contentHeight, (float)$pageContentTop[$pi]));
+        $bottomTrim = max(0.0, $contentHeight - max(0.0, min($contentHeight, (float)$pageContentBottom[$pi])));
+        $contentTrimTop[$pi] = $topTrim;
+        $contentTrimBottom[$pi] = $bottomTrim;
+        if ($topTrim > 0.5 || $bottomTrim > 0.5) {
+            $needsContentCompaction = true;
+        }
+    }
+
+    if ($needsContentCompaction) {
+        $oldContentHeights = [];
+        for ($pi = 0; $pi < $pageCount; $pi++) {
+            $oldContentHeights[$pi] = (float)($pageMeta[$pi]['content_height'] ?? 0.0);
+        }
+        $newOffsets = [];
+        $runningOffset = 0.0;
+        for ($pi = 0; $pi < $pageCount; $pi++) {
+            $pageMeta[$pi]['content_trim_top'] = (float)$contentTrimTop[$pi];
+            $pageMeta[$pi]['content_trim_bottom'] = (float)$contentTrimBottom[$pi];
+            $pageMeta[$pi]['content_height'] = max(
+                0.0,
+                (float)($pageMeta[$pi]['content_height'] ?? 0.0) - (float)$contentTrimTop[$pi] - (float)$contentTrimBottom[$pi]
+            );
+            $pageMeta[$pi]['offset_top'] = $runningOffset;
+            $newOffsets[$pi] = $runningOffset;
+            $runningOffset += (float)$pageMeta[$pi]['content_height'];
+        }
+
+        $compactedItems = [];
+        foreach ($jsonItems as $item) {
+            $pi = (int)($item['page_index'] ?? -1);
+            if ($pi < 0 || !isset($pageMeta[$pi])) {
+                $compactedItems[] = $item;
+                continue;
+            }
+            $oldOffset = (float)($pageOffsets[$pi] ?? 0.0);
+            $oldLocalTop = (float)($item['top'] ?? 0.0) - $oldOffset;
+            $boxHeight = ($item['type'] ?? '') === 'text'
+                ? max(0.0, (float)($item['font_size'] ?? 0.0))
+                : max(0.0, (float)($item['height'] ?? 0.0));
+            $oldLocalBottom = $oldLocalTop + $boxHeight;
+            $oldContentHeight = (float)($oldContentHeights[$pi] ?? 0.0);
+            $keptBandTop = (float)$contentTrimTop[$pi];
+            $keptBandBottom = max($keptBandTop, $oldContentHeight - (float)$contentTrimBottom[$pi]);
+            if ($oldLocalBottom <= $keptBandTop + 0.01 || $oldLocalTop >= $keptBandBottom - 0.01) {
+                continue;
+            }
+            $newLocalTop = max(0.0, $oldLocalTop - (float)$contentTrimTop[$pi]);
+            $newContentHeight = (float)($pageMeta[$pi]['content_height'] ?? 0.0);
+            if ($boxHeight > 0.0 && $newLocalTop + $boxHeight > $newContentHeight) {
+                $newLocalTop = max(0.0, $newContentHeight - $boxHeight);
+            }
+            $item['top'] = $newOffsets[$pi] + $newLocalTop;
+            $item['page_height'] = $newContentHeight;
+            $item['y'] = max(0.0, $newContentHeight - $newLocalTop - $boxHeight);
+            $compactedItems[] = $item;
+        }
+        $jsonItems = $compactedItems;
+
         usort($jsonItems, static function (array $a, array $b): int {
             $pa = (int)($a['page_index'] ?? 0);
             $pb = (int)($b['page_index'] ?? 0);
