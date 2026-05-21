@@ -109,8 +109,8 @@ function pdfMatrixMultiply(array $lhs, array $rhs): array
         $lhs[0] * $rhs[1] + $lhs[1] * $rhs[3],
         $lhs[2] * $rhs[0] + $lhs[3] * $rhs[2],
         $lhs[2] * $rhs[1] + $lhs[3] * $rhs[3],
-        $lhs[4] * $rhs[0] + $lhs[5] * $rhs[2] + $rhs[4],
-        $lhs[4] * $rhs[1] + $lhs[5] * $rhs[3] + $rhs[5],
+        $lhs[0] * $rhs[4] + $lhs[2] * $rhs[5] + $lhs[4],
+        $lhs[1] * $rhs[4] + $lhs[3] * $rhs[5] + $lhs[5],
     ];
 }
 
@@ -122,6 +122,28 @@ function pdfMatrixApply(array $matrix, float $x, float $y): array
     return [
         $matrix[0] * $x + $matrix[2] * $y + $matrix[4],
         $matrix[1] * $x + $matrix[3] * $y + $matrix[5],
+    ];
+}
+
+/**
+ * Compute the axis-aligned bounds of an affine-transformed rectangle.
+ *
+ * The matrix is [a b c d e f] and the local rectangle spans (0,0) to (width,height).
+ *
+ * @return array{0: float, 1: float, 2: float, 3: float}
+ */
+function pdfMatrixRectBounds(array $matrix, float $width = 1.0, float $height = 1.0, float $localX = 0.0, float $localY = 0.0): array
+{
+    [$x0, $y0] = pdfMatrixApply($matrix, $localX, $localY);
+    [$x1, $y1] = pdfMatrixApply($matrix, $localX + $width, $localY);
+    [$x2, $y2] = pdfMatrixApply($matrix, $localX, $localY + $height);
+    [$x3, $y3] = pdfMatrixApply($matrix, $localX + $width, $localY + $height);
+
+    return [
+        min($x0, $x1, $x2, $x3),
+        min($y0, $y1, $y2, $y3),
+        max($x0, $x1, $x2, $x3),
+        max($y0, $y1, $y2, $y3),
     ];
 }
 
@@ -329,19 +351,130 @@ function decodePredictorData(string $raw, $decodeParams, int $width, int $channe
 }
 
 /**
+ * @return array{0:int,1:int,2:int,3:int}|null
+ */
+function softMaskBounds(string $bytes, int $width, int $height, int $threshold = 8): ?array
+{
+    if ($width <= 0 || $height <= 0) {
+        return null;
+    }
+
+    $expected = $width * $height;
+    if (strlen($bytes) < $expected) {
+        return null;
+    }
+
+    $minX = $width;
+    $minY = $height;
+    $maxX = -1;
+    $maxY = -1;
+
+    for ($y = 0; $y < $height; $y++) {
+        $rowOffset = $y * $width;
+        for ($x = 0; $x < $width; $x++) {
+            if (ord($bytes[$rowOffset + $x]) <= $threshold) {
+                continue;
+            }
+            if ($x < $minX) $minX = $x;
+            if ($y < $minY) $minY = $y;
+            if ($x > $maxX) $maxX = $x;
+            if ($y > $maxY) $maxY = $y;
+        }
+    }
+
+    if ($maxX < $minX || $maxY < $minY) {
+        return null;
+    }
+
+    return [$minX, $minY, $maxX + 1, $maxY + 1];
+}
+
+function invertMaskBytes(string $bytes): string
+{
+    $out = '';
+    $len = strlen($bytes);
+    for ($i = 0; $i < $len; $i++) {
+        $out .= chr(255 - ord($bytes[$i]));
+    }
+    return $out;
+}
+
+/**
+ * @return array{bytes:string,crop:array{0:int,1:int,2:int,3:int}}
+ */
+function normalizeSoftMaskBytes(string $bytes, int $width, int $height, bool $invert = false): array
+{
+    $bytes = substr($bytes, 0, max(0, $width * $height));
+    $fullCrop = [0, 0, max(1, $width), max(1, $height)];
+    if ($width <= 0 || $height <= 0 || $bytes === '') {
+        return ['bytes' => $bytes, 'crop' => $fullCrop];
+    }
+
+    if ($invert) {
+        $bytes = invertMaskBytes($bytes);
+        return ['bytes' => $bytes, 'crop' => softMaskBounds($bytes, $width, $height) ?? $fullCrop];
+    }
+
+    $crop = softMaskBounds($bytes, $width, $height);
+    $normalArea = $crop ? max(1, ($crop[2] - $crop[0]) * ($crop[3] - $crop[1])) : ($width * $height);
+
+    $edgeOpaque = 0;
+    $edgeCount = 0;
+    for ($x = 0; $x < $width; $x++) {
+        $edgeCount += 2;
+        if (ord($bytes[$x]) > 245) $edgeOpaque++;
+        if (ord($bytes[(($height - 1) * $width) + $x]) > 245) $edgeOpaque++;
+    }
+    for ($y = 1; $y < ($height - 1); $y++) {
+        $rowOffset = $y * $width;
+        $edgeCount += 2;
+        if (ord($bytes[$rowOffset]) > 245) $edgeOpaque++;
+        if (ord($bytes[$rowOffset + $width - 1]) > 245) $edgeOpaque++;
+    }
+    $edgeOpaqueRatio = $edgeCount > 0 ? ($edgeOpaque / $edgeCount) : 0.0;
+
+    if ($edgeOpaqueRatio <= 0.8 || $normalArea < (int)round($width * $height * 0.9)) {
+        return ['bytes' => $bytes, 'crop' => $crop ?? $fullCrop];
+    }
+
+    $inverted = invertMaskBytes($bytes);
+    $invertedCrop = softMaskBounds($inverted, $width, $height);
+    if ($invertedCrop === null) {
+        return ['bytes' => $bytes, 'crop' => $crop ?? $fullCrop];
+    }
+
+    $invertedArea = max(1, ($invertedCrop[2] - $invertedCrop[0]) * ($invertedCrop[3] - $invertedCrop[1]));
+    if ($invertedArea < ($normalArea * 0.85)) {
+        return ['bytes' => $inverted, 'crop' => $invertedCrop];
+    }
+
+    return ['bytes' => $bytes, 'crop' => $crop ?? $fullCrop];
+}
+
+/**
  * Compose an SVG data URI that applies a grayscale mask onto a colour image URI.
  */
-function makeMaskedSvgDataUri(string $colorDataUri, string $maskDataUri, float $width, float $height): string
+function makeMaskedSvgDataUri(string $colorDataUri, string $maskDataUri, float $width, float $height, ?array $crop = null): string
 {
     $width = max(1.0, $width);
     $height = max(1.0, $height);
+    $cropX = 0.0;
+    $cropY = 0.0;
+    $cropW = $width;
+    $cropH = $height;
+    if (is_array($crop) && count($crop) >= 4) {
+        $cropX = max(0.0, (float)$crop[0]);
+        $cropY = max(0.0, (float)$crop[1]);
+        $cropW = max(1.0, min($width - $cropX, (float)$crop[2] - (float)$crop[0]));
+        $cropH = max(1.0, min($height - $cropY, (float)$crop[3] - (float)$crop[1]));
+    }
 
     $svg = [];
-    $svg[] = '<svg xmlns="http://www.w3.org/2000/svg" width="' . $width . '" height="' . $height . '" viewBox="0 0 ' . $width . ' ' . $height . '">';
-    $svg[] = '<defs><mask id="m" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="0" y="0" width="' . $width . '" height="' . $height . '">';
-    $svg[] = '<image x="0" y="0" width="' . $width . '" height="' . $height . '" href="' . $maskDataUri . '" />';
+    $svg[] = '<svg xmlns="http://www.w3.org/2000/svg" width="' . $cropW . '" height="' . $cropH . '" viewBox="0 0 ' . $cropW . ' ' . $cropH . '">';
+    $svg[] = '<defs><mask id="m" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="0" y="0" width="' . $cropW . '" height="' . $cropH . '">';
+    $svg[] = '<image x="' . (-$cropX) . '" y="' . (-$cropY) . '" width="' . $width . '" height="' . $height . '" href="' . $maskDataUri . '" />';
     $svg[] = '</mask></defs>';
-    $svg[] = '<image x="0" y="0" width="' . $width . '" height="' . $height . '" href="' . $colorDataUri . '" mask="url(#m)" />';
+    $svg[] = '<image x="' . (-$cropX) . '" y="' . (-$cropY) . '" width="' . $width . '" height="' . $height . '" href="' . $colorDataUri . '" mask="url(#m)" />';
     $svg[] = '</svg>';
 
     return 'data:image/svg+xml;base64,' . base64_encode(implode('', $svg));
@@ -375,6 +508,209 @@ function makeImageWithTextsSvg(string $backgroundUri, float $width, float $heigh
     $svg[] = '</svg>';
 
     return 'data:image/svg+xml;base64,' . base64_encode(implode('', $svg));
+}
+
+function decodeSvgDataUri(string $dataUri): ?string
+{
+    if (!str_starts_with($dataUri, 'data:image/svg+xml')) {
+        return null;
+    }
+    $comma = strpos($dataUri, ',');
+    if ($comma === false) {
+        return null;
+    }
+    if (str_contains(substr($dataUri, 0, $comma), ';base64')) {
+        $decoded = base64_decode(substr($dataUri, $comma + 1), true);
+        return is_string($decoded) ? $decoded : null;
+    }
+    return rawurldecode(substr($dataUri, $comma + 1));
+}
+
+/**
+ * @return array{0:float,1:float,2:float,3:float}|null
+ */
+function rawItemBounds(array $item): ?array
+{
+    if (($item['type'] ?? '') !== 'image') {
+        return null;
+    }
+
+    if (isset($item['tm_a'])) {
+        $matrix = [
+            (float)($item['tm_a'] ?? 0.0),
+            (float)($item['tm_b'] ?? 0.0),
+            (float)($item['tm_c'] ?? 0.0),
+            (float)($item['tm_d'] ?? 0.0),
+            (float)($item['tm_e'] ?? $item['x'] ?? 0.0),
+            (float)($item['tm_f'] ?? $item['y'] ?? 0.0),
+        ];
+        $objW = max(1.0, (float)($item['object_width'] ?? 1.0));
+        $objH = max(1.0, (float)($item['object_height'] ?? 1.0));
+        $objX = (float)($item['object_min_x'] ?? 0.0);
+        $objY = (float)($item['object_min_y'] ?? 0.0);
+        return pdfMatrixRectBounds($matrix, $objW, $objH, $objX, $objY);
+    }
+
+    $minX = (float)($item['x'] ?? 0.0);
+    $minY = (float)($item['y'] ?? 0.0);
+    return [
+        $minX,
+        $minY,
+        $minX + max(0.0, (float)($item['render_w'] ?? 0.0)),
+        $minY + max(0.0, (float)($item['render_h'] ?? 0.0)),
+    ];
+}
+
+function makeCompositeImageDataUri(array $layers, float $minX, float $minY, float $maxX, float $maxY): string
+{
+    $width = max(1.0, $maxX - $minX);
+    $height = max(1.0, $maxY - $minY);
+    $svg = [];
+    $svg[] = '<svg xmlns="http://www.w3.org/2000/svg" width="' . $width . '" height="' . $height . '" viewBox="0 0 ' . $width . ' ' . $height . '">';
+    foreach ($layers as $layer) {
+        [$lx0, $ly0, $lx1, $ly1] = $layer['bounds'];
+        $layerWidth = max(1.0, $lx1 - $lx0);
+        $layerHeight = max(1.0, $ly1 - $ly0);
+        $x = $lx0 - $minX;
+        $y = $height - ($ly1 - $minY);
+        $svg[] = '<image x="' . $x . '" y="' . $y . '" width="' . $layerWidth . '" height="' . $layerHeight . '" href="' . htmlspecialchars((string)$layer['href'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '" />';
+    }
+    $svg[] = '</svg>';
+    return 'data:image/svg+xml;base64,' . base64_encode(implode('', $svg));
+}
+
+function mergeOverlappingImageLayers(array $items): array
+{
+    $byPage = [];
+    foreach ($items as $index => $item) {
+        if (($item['type'] ?? '') !== 'image') {
+            continue;
+        }
+        $pageIndex = (int)($item['page_index'] ?? 0);
+        $bounds = rawItemBounds($item);
+        if ($bounds === null) {
+            continue;
+        }
+        $svg = decodeSvgDataUri((string)($item['dataUri'] ?? ''));
+        $byPage[$pageIndex][] = [
+            'index' => $index,
+            'item' => $item,
+            'bounds' => $bounds,
+            'svg' => $svg,
+        ];
+    }
+
+    if ($byPage === []) {
+        return $items;
+    }
+
+    $remove = [];
+    $add = [];
+
+    foreach ($byPage as $pageItems) {
+        foreach ($pageItems as $candidate) {
+            if (isset($remove[$candidate['index']])) {
+                continue;
+            }
+            $svg = $candidate['svg'];
+            if (!is_string($svg) || !str_contains($svg, '<mask') || !str_contains($svg, '<image')) {
+                continue;
+            }
+
+            [$baseMinX, $baseMinY, $baseMaxX, $baseMaxY] = $candidate['bounds'];
+            $layers = [
+                [
+                    'href' => (string)$candidate['item']['dataUri'],
+                    'bounds' => $candidate['bounds'],
+                ],
+            ];
+            $matched = [];
+            $unionMinX = $baseMinX;
+            $unionMinY = $baseMinY;
+            $unionMaxX = $baseMaxX;
+            $unionMaxY = $baseMaxY;
+
+            foreach ($pageItems as $overlay) {
+                if ($overlay['index'] === $candidate['index'] || isset($remove[$overlay['index']])) {
+                    continue;
+                }
+                $overlaySvg = $overlay['svg'];
+                if (!is_string($overlaySvg) || !str_contains($overlaySvg, '<path') || str_contains($overlaySvg, '<mask')) {
+                    continue;
+                }
+                [$ox0, $oy0, $ox1, $oy1] = $overlay['bounds'];
+                if ($ox0 < $baseMinX - 6.0 || $oy0 < $baseMinY - 6.0 || $ox1 > $baseMaxX + 6.0 || $oy1 > $baseMaxY + 6.0) {
+                    continue;
+                }
+                $matched[] = $overlay['index'];
+                $layers[] = [
+                    'href' => (string)$overlay['item']['dataUri'],
+                    'bounds' => $overlay['bounds'],
+                ];
+                $unionMinX = min($unionMinX, $ox0);
+                $unionMinY = min($unionMinY, $oy0);
+                $unionMaxX = max($unionMaxX, $ox1);
+                $unionMaxY = max($unionMaxY, $oy1);
+            }
+
+            if ($matched === []) {
+                continue;
+            }
+
+            $remove[$candidate['index']] = true;
+            foreach ($matched as $index) {
+                $remove[$index] = true;
+            }
+
+            $composite = $candidate['item'];
+            unset(
+                $composite['tm_a'],
+                $composite['tm_b'],
+                $composite['tm_c'],
+                $composite['tm_d'],
+                $composite['tm_e'],
+                $composite['tm_f'],
+                $composite['object_min_x'],
+                $composite['object_min_y'],
+                $composite['object_width'],
+                $composite['object_height']
+            );
+            $composite['x'] = $unionMinX;
+            $composite['y'] = $unionMinY;
+            $composite['render_w'] = $unionMaxX - $unionMinX;
+            $composite['render_h'] = $unionMaxY - $unionMinY;
+            $composite['dataUri'] = makeCompositeImageDataUri($layers, $unionMinX, $unionMinY, $unionMaxX, $unionMaxY);
+            $add[] = $composite;
+        }
+    }
+
+    if ($remove === [] || $add === []) {
+        return $items;
+    }
+
+    $merged = [];
+    foreach ($items as $index => $item) {
+        if (!isset($remove[$index])) {
+            $merged[] = $item;
+        }
+    }
+    foreach ($add as $item) {
+        $merged[] = $item;
+    }
+
+    usort($merged, static function (array $left, array $right): int {
+        $pageCompare = ((int)($left['page_index'] ?? 0)) <=> ((int)($right['page_index'] ?? 0));
+        if ($pageCompare !== 0) {
+            return $pageCompare;
+        }
+        $yCompare = ((float)($right['y'] ?? 0.0)) <=> ((float)($left['y'] ?? 0.0));
+        if ($yCompare !== 0) {
+            return $yCompare;
+        }
+        return ((float)($left['x'] ?? 0.0)) <=> ((float)($right['x'] ?? 0.0));
+    });
+
+    return $merged;
 }
 
 /**
@@ -855,8 +1191,11 @@ function renderFormToSvg(XObjectForm $form): array
                                 'type' => 'image',
                                 'href' => $dataUri,
                                 'transform' => $ctm,
-                                'width' => $widthImage ?? 0,
-                                'height' => $heightImage ?? 0,
+                                // PDF image XObjects are painted into the unit square and then scaled by the CTM.
+                                // Using pixel dimensions here would apply the geometry twice and displace nested
+                                // graphics relative to vector paths inside the same form.
+                                'width' => 1.0,
+                                'height' => 1.0,
                             ];
                         }
                     } elseif ($xObject instanceof XObjectForm) {
@@ -954,6 +1293,8 @@ function renderFormToSvg(XObjectForm $form): array
         'svg_xml' => implode('', $svg),
         'width' => $width,
         'height' => $height,
+        'min_x' => $minX,
+        'min_y' => $minY,
     ];
 }
 
@@ -1490,78 +1831,10 @@ try {
                             $name = ltrim(trim((string)($cmd['c'] ?? '')), '/'); if ($name==='') break;
                             $xo = $resolveXObject($container, $name);
                             if ($xo && $isImageXObject($xo)) {
-                                $dataUri = null; $filterVal = null; $w = null; $h = null;
-                                try { if ($xo->has('Filter')) { $filterVal = (string)$xo->get('Filter'); } } catch (\Throwable $e) {}
-                                $mime = detectMimeFromFilter($filterVal);
-                                if ($mime) {
-                                try {
-                                    $content = $xo->getContent();
-                                    if (is_string($content) && $content !== '') {
-                                        $dataUri = makeDisplayImageDataUri($mime, $content, $det);
-                                    }
-                                } catch (\Throwable $e) {}
-                                } elseif (is_string($filterVal) && stripos($filterVal, 'FlateDecode') !== false) {
-                                    try {
-                                        $detInner = $xo->getDetails(true);
-                                        $csVal = $detInner['ColorSpace'] ?? '';
-                                        $channels = channelsFromColorSpace($csVal, 3);
-                                        $w = (int)($detInner['Width'] ?? 0); $h = (int)($detInner['Height'] ?? 0);
-                                        $bpc = (int)($detInner['BitsPerComponent'] ?? 8);
-                                        if ($w > 0 && $h > 0 && $bpc === 8 && $channels > 0) {
-                                        $raw = $xo->getContent();
-                                        if (is_string($raw)) {
-                                            $raw = decodePredictorData($raw, $detInner['DecodeParms'] ?? null, $w, $channels, $bpc);
-                                        }
-                                        $expected = $w * $h * $channels;
-                                        if (is_string($raw) && strlen($raw) >= $expected) {
-                                            $pix = substr($raw, 0, $expected);
-                                                if ($channels === 4) { $pix = cmyk8ToRgb8($pix, $w, $h); $channels = 3; }
-                                                $png = makePng($w, $h, $channels, $bpc, $pix);
-                                                $dataUri = 'data:image/png;base64,' . base64_encode($png);
-                                            }
-                                        }
-                                    } catch (\Throwable $e) { /* ignore */ }
-                                }
-                                // Apply soft mask if exists
-                                try {
-                                    if ($dataUri && $xo->has('SMask')) {
-                                        $sm = $xo->get('SMask');
-                                        if ($sm) {
-                                            $detm = $sm->getDetails(true);
-                                            $mw = (int)($detm['Width'] ?? ($w ?? 0));
-                                            $mh = (int)($detm['Height'] ?? ($h ?? 0));
-                                            $mbpc = (int)($detm['BitsPerComponent'] ?? 8);
-                                            if ($mbpc === 8 && $mw > 0 && $mh > 0) {
-                                                $mraw = $sm->getContent();
-                                                if (is_string($mraw)) {
-                                                    $mraw = decodePredictorData($mraw, $detm['DecodeParms'] ?? null, $mw, 1, $mbpc);
-                                                    $expectedM = $mw * $mh;
-                                                    if (strlen($mraw) >= $expectedM) {
-                                                        $maskPng = makePng($mw, $mh, 1, 8, substr($mraw, 0, $expectedM));
-                                                        $maskUri = 'data:image/png;base64,' . base64_encode($maskPng);
-                                                        $dataUri = makeMaskedSvgDataUri($dataUri, $maskUri, (float)($w ?? $mw), (float)($h ?? $mh));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                } catch (\Throwable $e) { /* ignore SMask errors */ }
-                                $items[] = [
-                                    'type' => 'image',
-                                    'page_index' => $pageIndex0,
-                                    'x' => (float)$tm[4],
-                                    'y' => (float)$tm[5],
-                                    'page_height' => $pageHeight,
-                                    'dataUri' => $dataUri,
-                                    'render_w' => abs((float)$tm[0]),
-                                    'render_h' => abs((float)$tm[3]),
-                                    'tm_a' => (float)$tm[0],
-                                    'tm_b' => (float)$tm[1],
-                                    'tm_c' => (float)$tm[2],
-                                    'tm_d' => (float)$tm[3],
-                                    'tm_e' => (float)$tm[4],
-                                    'tm_f' => (float)$tm[5],
-                                ];
+                                // Nested raster/image XObjects are already embedded into the parent form SVG by
+                                // renderFormToSvg(). Emitting them again here produces duplicate HTML items in the
+                                // parent page coordinate system and displaces mixed vector+raster graphics.
+                                break;
                             } elseif ($xo instanceof XObjectForm) {
                                 $scanXObject($xo, $tm);
                             }
@@ -1652,13 +1925,10 @@ try {
                                                 $mraw = decodePredictorData($mraw, $detm['DecodeParms'] ?? null, $mw, $channelsM, $mbpc);
                                                 $expectedM = $mw * $mh * $channelsM;
                                                 if (strlen($mraw) >= $expectedM) {
-                                                    $bytes = substr($mraw, 0, $expectedM);
-                                                    if ($invert) {
-                                                        $bytes = implode('', array_map(function ($c) { $o = ord($c); return chr(255 - $o); }, str_split($bytes, 1)));
-                                                    }
-                                                    $maskPng = makePng($mw, $mh, 1, 8, $bytes);
+                                                    $maskInfo = normalizeSoftMaskBytes(substr($mraw, 0, $expectedM), $mw, $mh, $invert);
+                                                    $maskPng = makePng($mw, $mh, 1, 8, $maskInfo['bytes']);
                                                     $maskUri = 'data:image/png;base64,' . base64_encode($maskPng);
-                                                    $dataUri = makeMaskedSvgDataUri($dataUri, $maskUri, (float)($w ?? $mw), (float)($h ?? $mh));
+                                                    $dataUri = makeMaskedSvgDataUri($dataUri, $maskUri, (float)($w ?? $mw), (float)($h ?? $mh), $maskInfo['crop']);
                                                 }
                                             }
                                         }
@@ -1689,24 +1959,30 @@ try {
                                 if ($svgXml !== '') {
                                     $cw = (float)($child['width'] ?? 0.0);
                                     $ch = (float)($child['height'] ?? 0.0);
+                                    $cminX = (float)($child['min_x'] ?? 0.0);
+                                    $cminY = (float)($child['min_y'] ?? 0.0);
                                     $sa = abs((float)$concatTm[0]);
                                     $sd = abs((float)$concatTm[3]);
                                     $rw = ($cw > 0.0 ? $cw * ($sa > 0.0 ? $sa : 1.0) : $sa);
                                     $rh = ($ch > 0.0 ? $ch * ($sd > 0.0 ? $sd : 1.0) : $sd);
                                     $items[] = [
-                                        'type' => 'image',
-                                        'page_index' => $pageIndex0,
-                                        'x' => (float)$concatTm[4],
-                                        'y' => (float)$concatTm[5],
-                                        'page_height' => $pageHeight,
+                                    'type' => 'image',
+                                    'page_index' => $pageIndex0,
+                                    'x' => (float)$concatTm[4],
+                                    'y' => (float)$concatTm[5],
+                                    'page_height' => $pageHeight,
                                         'dataUri' => 'data:image/svg+xml;base64,'.base64_encode($svgXml),
                                         'render_w' => $rw,
                                         'render_h' => $rh,
+                                        'object_min_x' => $cminX,
+                                        'object_min_y' => $cminY,
+                                        'object_width' => $cw,
+                                        'object_height' => $ch,
                                         'tm_a' => (float)$concatTm[0],
-                                        'tm_b' => (float)$concatTm[1],
-                                        'tm_c' => (float)$concatTm[2],
-                                        'tm_d' => (float)$concatTm[3],
-                                        'tm_e' => (float)$concatTm[4],
+                                    'tm_b' => (float)$concatTm[1],
+                                    'tm_c' => (float)$concatTm[2],
+                                    'tm_d' => (float)$concatTm[3],
+                                    'tm_e' => (float)$concatTm[4],
                                         'tm_f' => (float)$concatTm[5],
                                     ];
                                 }
@@ -2004,12 +2280,19 @@ try {
                 // Compute image bounds in PDF coordinates (bottom-left origin)
                 $hasTm = isset($im['tm_a']);
                 if ($hasTm) {
-                    $a = (float)($im['tm_a'] ?? 0.0); $b = (float)($im['tm_b'] ?? 0.0); $c = (float)($im['tm_c'] ?? 0.0); $d = (float)($im['tm_d'] ?? 0.0);
-                    $e = (float)($im['tm_e'] ?? $im['x'] ?? 0.0); $f = (float)($im['tm_f'] ?? $im['y'] ?? 0.0);
-                    $ix0 = $e + min(0.0, $a, $c, $a + $c);
-                    $ix1 = $e + max(0.0, $a, $c, $a + $c);
-                    $iy0 = $f + min(0.0, $b, $d, $b + $d);
-                    $iy1 = $f + max(0.0, $b, $d, $b + $d);
+                    $matrix = [
+                        (float)($im['tm_a'] ?? 0.0),
+                        (float)($im['tm_b'] ?? 0.0),
+                        (float)($im['tm_c'] ?? 0.0),
+                        (float)($im['tm_d'] ?? 0.0),
+                        (float)($im['tm_e'] ?? $im['x'] ?? 0.0),
+                        (float)($im['tm_f'] ?? $im['y'] ?? 0.0),
+                    ];
+                    $objW = max(1.0, (float)($im['object_width'] ?? 1.0));
+                    $objH = max(1.0, (float)($im['object_height'] ?? 1.0));
+                    $objX = (float)($im['object_min_x'] ?? 0.0);
+                    $objY = (float)($im['object_min_y'] ?? 0.0);
+                    [$ix0, $iy0, $ix1, $iy1] = pdfMatrixRectBounds($matrix, $objW, $objH, $objX, $objY);
                 } else {
                     $w0 = (float)($im['render_w'] ?? 0.0); $h0 = (float)($im['render_h'] ?? 0.0);
                     $ix0 = (float)($im['x'] ?? 0.0); $iy0 = (float)($im['y'] ?? 0.0);
@@ -2352,16 +2635,19 @@ try {
         $src = (string)($item['dataUri'] ?? '');
         if ($src === '') continue;
         if (isset($item['tm_a'])) {
-            $a = (float)($item['tm_a'] ?? 0.0);
-            $b = (float)($item['tm_b'] ?? 0.0);
-            $c = (float)($item['tm_c'] ?? 0.0);
-            $d = (float)($item['tm_d'] ?? 0.0);
-            $e = (float)($item['tm_e'] ?? $item['x'] ?? 0.0);
-            $f = (float)($item['tm_f'] ?? $item['y'] ?? 0.0);
-            $minX = $e + min(0.0, $a, $c, $a + $c);
-            $maxX = $e + max(0.0, $a, $c, $a + $c);
-            $minY = $f + min(0.0, $b, $d, $b + $d);
-            $maxY = $f + max(0.0, $b, $d, $b + $d);
+            $matrix = [
+                (float)($item['tm_a'] ?? 0.0),
+                (float)($item['tm_b'] ?? 0.0),
+                (float)($item['tm_c'] ?? 0.0),
+                (float)($item['tm_d'] ?? 0.0),
+                (float)($item['tm_e'] ?? $item['x'] ?? 0.0),
+                (float)($item['tm_f'] ?? $item['y'] ?? 0.0),
+            ];
+            $objW = max(1.0, (float)($item['object_width'] ?? 1.0));
+            $objH = max(1.0, (float)($item['object_height'] ?? 1.0));
+            $objX = (float)($item['object_min_x'] ?? 0.0);
+            $objY = (float)($item['object_min_y'] ?? 0.0);
+            [$minX, $minY, $maxX, $maxY] = pdfMatrixRectBounds($matrix, $objW, $objH, $objX, $objY);
             $localTop = max(0.0, $ph - $maxY);
             $headerExtent = max(0.0, $ph - $minY);
             $footerExtent = max(0.0, $maxY);
@@ -2431,14 +2717,19 @@ try {
             }
             if ($type === 'image' || $type === 'line') {
                 if (isset($it['tm_a'])) {
-                    $a = (float)($it['tm_a'] ?? 0.0);
-                    $b = (float)($it['tm_b'] ?? 0.0);
-                    $c = (float)($it['tm_c'] ?? 0.0);
-                    $d = (float)($it['tm_d'] ?? 0.0);
-                    $e = (float)($it['tm_e'] ?? $it['x'] ?? 0.0);
-                    $f = (float)($it['tm_f'] ?? $it['y'] ?? 0.0);
-                    $minY = $f + min(0.0, $b, $d, $b + $d);
-                    $maxY = $f + max(0.0, $b, $d, $b + $d);
+                    $matrix = [
+                        (float)($it['tm_a'] ?? 0.0),
+                        (float)($it['tm_b'] ?? 0.0),
+                        (float)($it['tm_c'] ?? 0.0),
+                        (float)($it['tm_d'] ?? 0.0),
+                        (float)($it['tm_e'] ?? $it['x'] ?? 0.0),
+                        (float)($it['tm_f'] ?? $it['y'] ?? 0.0),
+                    ];
+                    $objW = max(1.0, (float)($it['object_width'] ?? 1.0));
+                    $objH = max(1.0, (float)($it['object_height'] ?? 1.0));
+                    $objX = (float)($it['object_min_x'] ?? 0.0);
+                    $objY = (float)($it['object_min_y'] ?? 0.0);
+                    [, $minY, , $maxY] = pdfMatrixRectBounds($matrix, $objW, $objH, $objX, $objY);
                     $localTop = max(0.0, $ph - $maxY);
                     $footerExtent = max(0.0, $maxY);
                 } else {
@@ -2474,6 +2765,8 @@ try {
             $pageHeights[$pi] = max(0.0, (float)$pageHeights[$pi] - (float)$pageHeaderCut2[$pi] - (float)$pageFooterCut2[$pi]);
         }
     }
+
+    $items = mergeOverlappingImageLayers($items);
 
     if ($bboxTextItems !== []) {
         $finalAnchorHashes = [];
@@ -2593,11 +2886,19 @@ try {
                     $bottom = $top + $h;
                     if ($bottom > $maxBottomCss) $maxBottomCss = $bottom;
                 } else {
-                    $a = (float)$it['tm_a']; $b = (float)$it['tm_b']; $c = (float)$it['tm_c']; $d = (float)$it['tm_d']; $e = (float)$it['tm_e']; $f = (float)$it['tm_f'];
-                    $minX = $e + min(0.0, $a, $c, $a + $c);
-                    $maxX = $e + max(0.0, $a, $c, $a + $c);
-                    $minY = $f + min(0.0, $b, $d, $b + $d);
-                    $maxY = $f + max(0.0, $b, $d, $b + $d);
+                    $matrix = [
+                        (float)$it['tm_a'],
+                        (float)$it['tm_b'],
+                        (float)$it['tm_c'],
+                        (float)$it['tm_d'],
+                        (float)$it['tm_e'],
+                        (float)$it['tm_f'],
+                    ];
+                    $objW = max(1.0, (float)($it['object_width'] ?? 1.0));
+                    $objH = max(1.0, (float)($it['object_height'] ?? 1.0));
+                    $objX = (float)($it['object_min_x'] ?? 0.0);
+                    $objY = (float)($it['object_min_y'] ?? 0.0);
+                    [$minX, $minY, $maxX, $maxY] = pdfMatrixRectBounds($matrix, $objW, $objH, $objX, $objY);
                     $left = $minX;
                     $phUse = $ph > 0.0 ? $ph : (float)($pageHeights[$piCur] ?? 0.0);
                     if ($phUse <= 0.0) { $phUse = max(0.0, $maxY); }
@@ -2721,16 +3022,19 @@ try {
                 ];
             } else {
                 // TM-based placement like HTML (use AABB)
-                $a = (float)$it['tm_a'];
-                $b = (float)$it['tm_b'];
-                $c = (float)$it['tm_c'];
-                $d = (float)$it['tm_d'];
-                $e = (float)$it['tm_e'];
-                $f = (float)$it['tm_f'];
-                $minX = $e + min(0.0, $a, $c, $a + $c);
-                $maxX = $e + max(0.0, $a, $c, $a + $c);
-                $minY = $f + min(0.0, $b, $d, $b + $d);
-                $maxY = $f + max(0.0, $b, $d, $b + $d);
+                $matrix = [
+                    (float)$it['tm_a'],
+                    (float)$it['tm_b'],
+                    (float)$it['tm_c'],
+                    (float)$it['tm_d'],
+                    (float)$it['tm_e'],
+                    (float)$it['tm_f'],
+                ];
+                $objW = max(1.0, (float)($it['object_width'] ?? 1.0));
+                $objH = max(1.0, (float)($it['object_height'] ?? 1.0));
+                $objX = (float)($it['object_min_x'] ?? 0.0);
+                $objY = (float)($it['object_min_y'] ?? 0.0);
+                [$minX, $minY, $maxX, $maxY] = pdfMatrixRectBounds($matrix, $objW, $objH, $objX, $objY);
                 $left = $minX;
                 $phUse = $ph > 0.0 ? $ph : (float)($pageHeights[$pi] ?? 0.0);
                 if ($phUse <= 0.0) { $phUse = max(0.0, $maxY); }
