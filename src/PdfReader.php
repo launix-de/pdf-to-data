@@ -10,7 +10,10 @@ use Launix\PdfToData\Internal\XtractCliEngine;
 
 final class PdfReader
 {
+    private readonly ExtractorEngine $extractor;
+    private readonly NormalizedDocument $rawDocument;
     private ?NormalizedDocument $normalized = null;
+    private NormalizedDocument $currentDocument;
 
     public function __construct(
         private readonly string $pdfBytes,
@@ -20,6 +23,10 @@ final class PdfReader
         if ($this->pdfBytes === '') {
             throw new InvalidArgumentException('PDF input must not be empty.');
         }
+
+        $this->extractor = $this->engine ?? new XtractCliEngine();
+        $this->rawDocument = $this->extractor->extractRaw($this->pdfBytes, $this->filename);
+        $this->currentDocument = $this->rawDocument;
     }
 
     public static function fromFile(string $filename, ?ExtractorEngine $engine = null): self
@@ -59,18 +66,19 @@ final class PdfReader
     }
 
     /**
-     * Normalize the PDF into one continuous stream without repeated page furniture.
+     * Normalize the already loaded elements into one continuous stream without repeated page furniture.
      *
      * @param array<string,mixed> $options
      */
     public function removeFooters(array $options = []): NormalizedDocument
     {
         if ($this->normalized instanceof NormalizedDocument && $options === []) {
+            $this->currentDocument = $this->normalized;
             return $this->normalized;
         }
 
-        $engine = $this->engine ?? new XtractCliEngine();
-        $normalized = $engine->extract($this->pdfBytes, $this->filename, $options);
+        $normalized = $this->extractor->extract($this->pdfBytes, $this->filename, $options);
+        $this->currentDocument = $normalized;
 
         if ($options === []) {
             $this->normalized = $normalized;
@@ -80,24 +88,25 @@ final class PdfReader
     }
 
     /**
-     * Return all positioned elements of the normalized document.
+     * Return the currently loaded positioned elements.
      *
-     * @param array<string,mixed> $options
+     * Before `removeFooters()` this is the raw per-page element list.
+     * After `removeFooters()` this is the compacted one-page stream.
+     *
      * @return array<int,array<string,mixed>>
      */
-    public function extractElements(array $options = []): array
+    public function extractElements(): array
     {
-        return $this->removeFooters($options)->elements();
+        return $this->currentDocument->elements();
     }
 
     /**
-     * Build a higher-level sales-document payload from normalized elements.
+     * Build a higher-level sales-document payload from the current element list.
      *
-     * @param array<string,mixed> $options
      * @return array<string,mixed>
      */
-    public function extractSalesDocument(array $options = []): array
+    public function extractSalesDocument(): array
     {
-        return (new SalesDocumentExtractor())->extract($this->removeFooters($options));
+        return (new SalesDocumentExtractor())->extract($this->currentDocument);
     }
 }

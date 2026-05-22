@@ -39,8 +39,9 @@ final class XtractNormalizationTest extends TestCase
         self::assertStringContainsString('gamma body line', $text);
         self::assertStringContainsString('shared body line', $text);
 
+        self::assertStringContainsString('first page header', $text);
         self::assertStringNotContainsString('repeated header', $text);
-        self::assertStringNotContainsString('repeated footer', $text);
+        self::assertSame(1, substr_count($text, 'repeated footer'));
 
         self::assertNotEmpty($document->pages());
         self::assertGreaterThan(0, count($document->elements()));
@@ -71,8 +72,8 @@ final class XtractNormalizationTest extends TestCase
         self::assertSame($normalizedText, $text);
         self::assertStringContainsString('window white pvc', $text);
         self::assertStringContainsString('door anthracite', $text);
-        self::assertStringNotContainsString('repeated header', $text);
-        self::assertStringNotContainsString('repeated footer', $text);
+        self::assertSame(1, substr_count($text, 'repeated header'));
+        self::assertSame(1, substr_count($text, 'repeated footer'));
     }
 
     /**

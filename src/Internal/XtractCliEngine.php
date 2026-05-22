@@ -16,7 +16,17 @@ final class XtractCliEngine implements ExtractorEngine
     ) {
     }
 
+    public function extractRaw(string $pdfBytes, string $filename, array $options = []): NormalizedDocument
+    {
+        return $this->extractWithMode('raw', $pdfBytes, $filename, $options);
+    }
+
     public function extract(string $pdfBytes, string $filename, array $options = []): NormalizedDocument
+    {
+        return $this->extractWithMode('normalized', $pdfBytes, $filename, $options);
+    }
+
+    private function extractWithMode(string $mode, string $pdfBytes, string $filename, array $options = []): NormalizedDocument
     {
         $tmpDir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pdf-to-data-' . bin2hex(random_bytes(8));
         if (!mkdir($tmpDir, 0775, true) && !is_dir($tmpDir)) {
@@ -34,7 +44,9 @@ final class XtractCliEngine implements ExtractorEngine
                 $pdfPath,
             ];
 
-            [$exitCode, $stdout, $stderr] = $this->runProcess($command, $tmpDir);
+            [$exitCode, $stdout, $stderr] = $this->runProcess($command, $tmpDir, [
+                'PDF_TO_DATA_MODE' => $mode,
+            ]);
             if ($exitCode !== 0) {
                 throw new RuntimeException(sprintf(
                     "xtract failed with exit code %d.\nSTDOUT:\n%s\nSTDERR:\n%s",
@@ -70,7 +82,7 @@ final class XtractCliEngine implements ExtractorEngine
      * @param list<string> $command
      * @return array{0:int,1:string,2:string}
      */
-    private function runProcess(array $command, string $workingDirectory): array
+    private function runProcess(array $command, string $workingDirectory, array $extraEnv = []): array
     {
         $descriptorSpec = [
             0 => ['pipe', 'r'],
@@ -78,7 +90,9 @@ final class XtractCliEngine implements ExtractorEngine
             2 => ['pipe', 'w'],
         ];
 
-        $process = proc_open($command, $descriptorSpec, $pipes, $workingDirectory);
+        $environment = array_merge($_ENV, $extraEnv);
+
+        $process = proc_open($command, $descriptorSpec, $pipes, $workingDirectory, $environment);
         if (!is_resource($process)) {
             throw new RuntimeException('Could not start xtract process.');
         }

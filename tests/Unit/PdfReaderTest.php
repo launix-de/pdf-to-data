@@ -14,14 +14,30 @@ final class PdfReaderTest extends TestCase
     public function testItBuildsReaderFromStringAndDelegatesToEngine(): void
     {
         $engine = new class implements ExtractorEngine {
-            public int $calls = 0;
+            public int $rawCalls = 0;
+            public int $normalizedCalls = 0;
+
+            public function extractRaw(string $pdfBytes, string $filename, array $options = []): NormalizedDocument
+            {
+                TestCase::assertSame('%PDF-test', $pdfBytes);
+                TestCase::assertSame('sample.pdf', $filename);
+                TestCase::assertSame([], $options);
+                $this->rawCalls++;
+
+                return new NormalizedDocument(
+                    ['mode' => 'raw'],
+                    [['page' => 1]],
+                    [['type' => 'text', 'text' => 'raw']],
+                    '<html>raw</html>'
+                );
+            }
 
             public function extract(string $pdfBytes, string $filename, array $options = []): NormalizedDocument
             {
                 TestCase::assertSame('%PDF-test', $pdfBytes);
                 TestCase::assertSame('sample.pdf', $filename);
                 TestCase::assertSame(['mode' => 'test'], $options);
-                $this->calls++;
+                $this->normalizedCalls++;
 
                 return new NormalizedDocument(
                     ['stream_height' => 100],
@@ -33,12 +49,17 @@ final class PdfReaderTest extends TestCase
         };
 
         $reader = PdfReader::fromString('%PDF-test', 'sample.pdf', $engine);
+
+        self::assertSame(1, $engine->rawCalls);
+        self::assertSame(0, $engine->normalizedCalls);
+        self::assertSame('raw', $reader->extractElements()[0]['text']);
+
         $doc = $reader->removeFooters(['mode' => 'test']);
 
-        self::assertSame(1, $engine->calls);
+        self::assertSame(1, $engine->normalizedCalls);
         self::assertSame(100, $doc->meta()['stream_height']);
-        self::assertSame('hello', $reader->extractElements(['mode' => 'test'])[0]['text']);
-        self::assertSame(['hello'], $reader->extractSalesDocument(['mode' => 'test'])['text']);
+        self::assertSame('hello', $reader->extractElements()[0]['text']);
+        self::assertSame(['hello'], $reader->extractSalesDocument()['text']);
     }
 
     public function testItBuildsReaderFromStream(): void
@@ -48,6 +69,14 @@ final class PdfReaderTest extends TestCase
         rewind($stream);
 
         $engine = new class implements ExtractorEngine {
+            public function extractRaw(string $pdfBytes, string $filename, array $options = []): NormalizedDocument
+            {
+                TestCase::assertSame('%PDF-stream', $pdfBytes);
+                TestCase::assertSame('stream.pdf', $filename);
+
+                return new NormalizedDocument([], [], [], '');
+            }
+
             public function extract(string $pdfBytes, string $filename, array $options = []): NormalizedDocument
             {
                 TestCase::assertSame('%PDF-stream', $pdfBytes);

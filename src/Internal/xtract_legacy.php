@@ -148,6 +148,280 @@ function pdfMatrixRectBounds(array $matrix, float $width = 1.0, float $height = 
 }
 
 /**
+ * Drop text duplicates that only differ by tiny coordinate/font-size jitter.
+ *
+ * This mainly targets cases where parser text and bbox-layout text both survive
+ * the merge and end up rendered on top of each other.
+ *
+ * @param array<int,array<string,mixed>> $items
+ * @return array<int,array<string,mixed>>
+ */
+function deduplicateNearbyTextItems(array $items): array
+{
+    $filtered = [];
+    $seen = [];
+
+    foreach ($items as $item) {
+        if (($item['type'] ?? '') !== 'text') {
+            $filtered[] = $item;
+            continue;
+        }
+
+        $text = trim((string)($item['text'] ?? ''));
+        if ($text === '') {
+            $filtered[] = $item;
+            continue;
+        }
+
+        $key = (int)($item['page_index'] ?? 0)
+            . '|' . round((float)($item['left'] ?? $item['x'] ?? 0.0), 1)
+            . '|' . mb_strtolower(preg_replace('/\s+/u', ' ', $text), 'UTF-8');
+
+        $top = (float)($item['top'] ?? 0.0);
+        $fontSize = (float)($item['font_size'] ?? 0.0);
+
+        if (isset($seen[$key])) {
+            $prev = $seen[$key];
+            if (abs($prev['top'] - $top) <= 1.5 && abs($prev['font_size'] - $fontSize) <= 1.5) {
+                continue;
+            }
+        }
+
+        $seen[$key] = [
+            'top' => $top,
+            'font_size' => $fontSize,
+        ];
+        $filtered[] = $item;
+    }
+
+    return $filtered;
+}
+
+/**
+ * Emit the current positioned element list as absolute-positioned HTML and JSON.
+ *
+ * @param array<int,array<string,mixed>> $items
+ * @param array<int,float> $pageHeights
+ * @param array<int,float> $pageWidths
+ * @param array<int,array<string,mixed>> $pageMeta
+ * @param array<string,mixed> $meta
+ */
+function writeXtractSnapshot(array $items, array $pageHeights, array $pageWidths, array $pageMeta, array $meta): void
+{
+    $pageOffsets = [];
+    $maxWidth = 0.0;
+    foreach ($pageMeta as $page) {
+        $pageIndex = (int)($page['page_index'] ?? 0);
+        $pageOffsets[$pageIndex] = (float)($page['offset_top'] ?? 0.0);
+        $maxWidth = max($maxWidth, (float)($pageWidths[$pageIndex] ?? 0.0));
+    }
+
+    $jsonItems = [];
+    foreach ($items as $it) {
+        $pi = (int)($it['page_index'] ?? 0);
+        $ph = (float)($it['page_height'] ?? (float)($pageHeights[$pi] ?? 0.0));
+        $off = (float)($pageOffsets[$pi] ?? 0.0);
+
+        if (($it['type'] ?? '') === 'text') {
+            $fs = isset($it['font_size']) && is_numeric($it['font_size']) ? (float)$it['font_size'] : 12.0;
+            $b = isset($it['b']) ? (float)$it['b'] : 0.0;
+            $d = isset($it['d']) ? (float)$it['d'] : 1.0;
+            $yScale = hypot($b, $d);
+            $useScaledFs = is_finite($yScale) && ($yScale > 1.35 || $yScale < 0.74);
+            $fsCss = ($useScaledFs ? $fs * $yScale : $fs) * FONT_PX_SCALE;
+            $xCss = (float)($it['x'] ?? 0.0);
+            $yCss = (float)($it['y'] ?? 0.0);
+            $jsonItems[] = [
+                'type' => 'text',
+                'page' => $pi + 1,
+                'page_index' => $pi,
+                'x' => $xCss,
+                'y' => $yCss,
+                'left' => $xCss,
+                'top' => $off + max(0.0, $ph - $yCss - $fsCss),
+                'font_size' => $fsCss,
+                'text' => (string)($it['text'] ?? ''),
+                'bold' => (bool)($it['bold'] ?? false),
+            ];
+            continue;
+        }
+
+        if (($it['type'] ?? '') === 'image') {
+            $src = (string)($it['dataUri'] ?? '');
+            if ($src === '') {
+                continue;
+            }
+
+            if (!isset($it['tm_a'])) {
+                $leftCss = (float)($it['x'] ?? 0.0);
+                $yForTop = (float)($it['y'] ?? 0.0);
+                $w = max(0.0, (float)($it['render_w'] ?? 0.0));
+                $h = max(0.0, (float)($it['render_h'] ?? 0.0));
+                $pwUse = (float)($pageWidths[$pi] ?? $maxWidth);
+                if ($pwUse > 0.0) {
+                    $rightCss = $leftCss + $w;
+                    $leftCss = max(0.0, min($leftCss, $pwUse));
+                    $rightCss = max($leftCss, min($pwUse, $rightCss));
+                    $w = max(0.0, $rightCss - $leftCss);
+                }
+                $topLocal = max(0.0, $ph - $yForTop - $h);
+                $jsonItems[] = [
+                    'type' => 'image',
+                    'page' => $pi + 1,
+                    'page_index' => $pi,
+                    'x' => $leftCss,
+                    'y' => $yForTop,
+                    'left' => $leftCss,
+                    'top' => $off + $topLocal,
+                    'width' => $w,
+                    'height' => $h,
+                    'url' => $src,
+                ];
+                continue;
+            }
+
+            $matrix = [
+                (float)$it['tm_a'],
+                (float)$it['tm_b'],
+                (float)$it['tm_c'],
+                (float)$it['tm_d'],
+                (float)$it['tm_e'],
+                (float)$it['tm_f'],
+            ];
+            $objW = max(1.0, (float)($it['object_width'] ?? 1.0));
+            $objH = max(1.0, (float)($it['object_height'] ?? 1.0));
+            $objX = (float)($it['object_min_x'] ?? 0.0);
+            $objY = (float)($it['object_min_y'] ?? 0.0);
+            [$minX, $minY, $maxX, $maxY] = pdfMatrixRectBounds($matrix, $objW, $objH, $objX, $objY);
+            $left = $minX;
+            $phUse = $ph > 0.0 ? $ph : (float)($pageHeights[$pi] ?? 0.0);
+            if ($phUse <= 0.0) {
+                $phUse = max(0.0, $maxY);
+            }
+            $topLocalRaw = max(0.0, $phUse - $maxY);
+            $w = max(0.0, $maxX - $minX);
+            $h = max(0.0, $maxY - $minY);
+            $yNorm = $phUse > 0.0 ? max(0.0, min($phUse, $phUse - $topLocalRaw - $h)) : max(0.0, $maxY);
+            $topLocal = max(0.0, $phUse - $yNorm - $h);
+            $pwUse = (float)($pageWidths[$pi] ?? $maxWidth);
+            if ($pwUse > 0.0) {
+                $right = $left + $w;
+                $left = max(0.0, min($left, $pwUse));
+                $right = max($left, min($pwUse, $right));
+                $w = max(0.0, $right - $left);
+            }
+            $jsonItems[] = [
+                'type' => 'image',
+                'page' => $pi + 1,
+                'page_index' => $pi,
+                'x' => $left,
+                'y' => $yNorm,
+                'left' => $left,
+                'top' => $off + $topLocal,
+                'width' => $w,
+                'height' => $h,
+                'url' => $src,
+            ];
+            continue;
+        }
+
+        if (($it['type'] ?? '') === 'line') {
+            $w = max(0.0, (float)($it['render_w'] ?? 0.0));
+            $h = max(0.0, (float)($it['render_h'] ?? 0.0));
+            $y = (float)($it['y'] ?? 0.0);
+            $jsonItems[] = [
+                'type' => 'line',
+                'page' => $pi + 1,
+                'page_index' => $pi,
+                'x' => (float)($it['x'] ?? 0.0),
+                'y' => $y,
+                'left' => (float)($it['x'] ?? 0.0),
+                'top' => $off + max(0.0, $ph - ($y + $h)),
+                'width' => $w,
+                'height' => $h,
+                'color' => (string)($it['color'] ?? '#000'),
+            ];
+        }
+    }
+
+    usort($jsonItems, static function (array $a, array $b): int {
+        $pa = (int)($a['page_index'] ?? 0);
+        $pb = (int)($b['page_index'] ?? 0);
+        if ($pa !== $pb) {
+            return $pa <=> $pb;
+        }
+        $ta = (float)($a['top'] ?? 0.0);
+        $tb = (float)($b['top'] ?? 0.0);
+        if (abs($ta - $tb) > 0.5) {
+            return $ta <=> $tb;
+        }
+        $la = (float)($a['left'] ?? $a['x'] ?? 0.0);
+        $lb = (float)($b['left'] ?? $b['x'] ?? 0.0);
+        if (abs($la - $lb) > 0.01) {
+            return $la <=> $lb;
+        }
+        return strcmp((string)($a['type'] ?? ''), (string)($b['type'] ?? ''));
+    });
+    foreach ($jsonItems as $idx => &$jsonItem) {
+        $jsonItem['stream_index'] = $idx;
+    }
+    unset($jsonItem);
+
+    $renderedBottom = 0.0;
+    $htmlOut = [
+        '<!doctype html><html><head><meta charset="utf-8"><style>',
+        'body{margin:0;background:#f3f3f3;font-family:Arial,sans-serif;}',
+        '#canvas{position:relative;margin:0 auto;background:#fff;}',
+        '.item{position:absolute;box-sizing:border-box;}',
+        '.txt{white-space:pre;line-height:1;z-index:3;}',
+        '.img{display:block;z-index:1;}',
+        '.line{display:block;z-index:2;}',
+        '</style></head><body><div id="canvas">'
+    ];
+    foreach ($jsonItems as $item) {
+        $left = (float)($item['left'] ?? $item['x'] ?? 0.0);
+        $top = (float)($item['top'] ?? 0.0);
+        if (($item['type'] ?? '') === 'text') {
+            $fs = (float)($item['font_size'] ?? 12.0);
+            $weight = !empty($item['bold']) ? '700' : '400';
+            $htmlOut[] = '<div class="item txt" style="left:' . $left . 'px;top:' . $top . 'px;font-size:' . $fs . 'px;font-weight:' . $weight . ';">' . htmlspecialchars((string)($item['text'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</div>';
+            $renderedBottom = max($renderedBottom, $top + $fs);
+            continue;
+        }
+        if (($item['type'] ?? '') === 'image') {
+            $w = max(0.0, (float)($item['width'] ?? 0.0));
+            $h = max(0.0, (float)($item['height'] ?? 0.0));
+            $style = 'left:' . $left . 'px;top:' . $top . 'px;';
+            if ($w > 0.0) {
+                $style .= 'width:' . $w . 'px;';
+            }
+            if ($h > 0.0) {
+                $style .= 'height:' . $h . 'px;';
+            }
+            $htmlOut[] = '<img class="item img" style="' . $style . '" src="' . htmlspecialchars((string)($item['url'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '" alt="image" />';
+            $renderedBottom = max($renderedBottom, $top + $h);
+            continue;
+        }
+        if (($item['type'] ?? '') === 'line') {
+            $w = max(0.0, (float)($item['width'] ?? 0.0));
+            $h = max(0.0, (float)($item['height'] ?? 0.0));
+            $color = htmlspecialchars((string)($item['color'] ?? '#000'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            $htmlOut[] = '<div class="item line" style="left:' . $left . 'px;top:' . $top . 'px;width:' . $w . 'px;height:' . $h . 'px;background:' . $color . ';"></div>';
+            $renderedBottom = max($renderedBottom, $top + $h);
+        }
+    }
+    $meta['stream_height'] = $renderedBottom;
+    $htmlOut[] = '</div><style>#canvas{width:' . (int)ceil($maxWidth) . 'px;height:' . (int)ceil($renderedBottom) . 'px;}</style></body></html>';
+
+    file_put_contents('out2.html', implode('', $htmlOut));
+    file_put_contents('out2.json', json_encode([
+        'meta' => $meta,
+        'pages' => $pageMeta,
+        'items' => $jsonItems,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+/**
  * Convert normalised RGB components (0..1) to a CSS hex colour string.
  */
 function pdfRgbArrayToHex(array $rgb): string
@@ -2342,6 +2616,44 @@ try {
 
     // Image repeat filter disabled: header/footer cuts below will handle images in those zones.
 
+    $mode = strtolower(trim((string)(getenv('PDF_TO_DATA_MODE') ?: 'normalized')));
+    if ($mode === 'raw') {
+        $pageCount = count($pageHeights);
+        $pageMeta = [];
+        $runningOffset = 0.0;
+        for ($pi = 0; $pi < $pageCount; $pi++) {
+            $pageHeight = (float)($pageHeights[$pi] ?? 0.0);
+            $pageMeta[] = [
+                'page' => $pi + 1,
+                'page_index' => $pi,
+                'raw_height' => $pageHeight,
+                'header_cut' => 0.0,
+                'footer_cut' => 0.0,
+                'image_header_cut' => 0.0,
+                'image_footer_cut' => 0.0,
+                'content_height' => $pageHeight,
+                'offset_top' => $runningOffset,
+                'keep_header' => true,
+                'keep_footer' => true,
+                'content_trim_top' => 0.0,
+                'content_trim_bottom' => 0.0,
+            ];
+            $runningOffset += $pageHeight;
+        }
+
+        writeXtractSnapshot($items, $pageHeights, $pageWidths, $pageMeta, [
+            'mode' => 'raw',
+            'page_count' => $pageCount,
+            'repeat_threshold' => 0,
+            'header_repeated' => [],
+            'footer_repeated' => [],
+            'header_repeated_images' => [],
+            'footer_repeated_images' => [],
+            'stream_height' => $runningOffset,
+        ]);
+        exit(0);
+    }
+
     // Detect headers and footers across pages, remove them (except first-page header and last-page footer),
     // and subtract their heights from page height to avoid gaps.
     $pageCount = count($pageHeights);
@@ -2503,6 +2815,9 @@ try {
             }
         }
         $hr = min($hr, $ph * 0.25);
+        if ($pi === 0) {
+            $hr = 0.0;
+        }
         $pageHeaderCut[$pi] = $hr;
 
         $fr = 0.0;
@@ -2517,6 +2832,9 @@ try {
             }
         }
         $fr = min($fr, $ph * 0.25);
+        if ($pi === $pageCount - 1) {
+            $fr = 0.0;
+        }
         $pageFooterCut[$pi] = $fr;
     }
 
@@ -2694,6 +3012,12 @@ try {
             if (!empty($footerRepeatedImages[$imgInfo['sig']])) {
                 $pageFooterCut2[$pi] = max($pageFooterCut2[$pi], min($ph * 0.25, (float)$imgInfo['extent']));
             }
+        }
+        if ($pi === 0) {
+            $pageHeaderCut2[$pi] = 0.0;
+        }
+        if ($pi === $pageCount - 1) {
+            $pageFooterCut2[$pi] = 0.0;
         }
     }
     $needsSecondaryCut = false;
@@ -3110,8 +3434,8 @@ try {
             'image_footer_cut' => (float)($pageFooterCut2[$pi] ?? 0.0),
             'content_height' => (float)($pageHeights[$pi] ?? 0.0),
             'offset_top' => (float)($pageOffsets[$pi] ?? 0.0),
-            'keep_header' => false,
-            'keep_footer' => false,
+            'keep_header' => $pi === 0,
+            'keep_footer' => $pi === ($pageCount - 1),
         ];
     }
 
@@ -3171,6 +3495,12 @@ try {
             if (!empty($postFooterRepeatedImages[$imgInfo['sig']])) {
                 $postFooterCuts[$pi] = max($postFooterCuts[$pi], min($contentHeight * 0.25, (float)$imgInfo['extent']));
             }
+        }
+        if ($pi === 0) {
+            $postHeaderCuts[$pi] = 0.0;
+        }
+        if ($pi === $pageCount - 1) {
+            $postFooterCuts[$pi] = 0.0;
         }
     }
     $needsJsonCut = false;
@@ -3275,6 +3605,12 @@ try {
         $contentHeight = (float)($pageMeta[$pi]['content_height'] ?? 0.0);
         $topTrim = max(0.0, min($contentHeight, (float)$pageContentTop[$pi]));
         $bottomTrim = max(0.0, $contentHeight - max(0.0, min($contentHeight, (float)$pageContentBottom[$pi])));
+        if ($pi === 0) {
+            $topTrim = 0.0;
+        }
+        if ($pi === $pageCount - 1) {
+            $bottomTrim = 0.0;
+        }
         $contentTrimTop[$pi] = $topTrim;
         $contentTrimBottom[$pi] = $bottomTrim;
         if ($topTrim > 0.5 || $bottomTrim > 0.5) {
@@ -3350,15 +3686,21 @@ try {
         unset($jsonItem);
     }
 
+    $jsonItems = deduplicateNearbyTextItems($jsonItems);
+    foreach ($jsonItems as $idx => &$jsonItem) {
+        $jsonItem['stream_index'] = $idx;
+    }
+    unset($jsonItem);
+
     $renderedBottom = 0.0;
     $htmlOut = [
         '<!doctype html><html><head><meta charset="utf-8"><style>',
         'body{margin:0;background:#f3f3f3;font-family:Arial,sans-serif;}',
         '#canvas{position:relative;margin:0 auto;background:#fff;}',
         '.item{position:absolute;box-sizing:border-box;}',
-        '.txt{white-space:pre;line-height:1;}',
-        '.img{display:block;}',
-        '.line{display:block;}',
+        '.txt{white-space:pre;line-height:1;z-index:3;}',
+        '.img{display:block;z-index:1;}',
+        '.line{display:block;z-index:2;}',
         '</style></head><body><div id="canvas">'
     ];
     foreach ($jsonItems as $item) {

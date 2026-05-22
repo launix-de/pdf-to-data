@@ -1,0 +1,52 @@
+{
+  "normalized": {
+    "pages_count": 2,
+    "meta": {
+      "page_count": 2
+    },
+    "text_contains": [
+      "Angebot Nr. 1000",
+      "Montageleistung",
+      "Schraube",
+      "Summe Netto",
+      "MwSt. (19%)",
+      "Summe Brutto"
+    ]
+  },
+  "sales_document": {
+    "quotation": {
+      "schema": [
+        "beschreibung",
+        "einzelpreis",
+        "menge",
+        "einheit",
+        "gesamt"
+      ],
+      "line_items": [
+        {
+          "position": "1.",
+          "beschreibung": "Montageleistung\nMontageleistung nach\nStundenabrechnung",
+          "einzelpreis": "55,00 EUR",
+          "menge": "100",
+          "einheit": "h",
+          "gesamt": "5.500,00 EUR"
+        },
+        {
+          "position": null,
+          "beschreibung": "Schraube",
+          "einzelpreis": "0,25 EUR",
+          "menge": "10000",
+          "einheit": "Stück",
+          "gesamt": "2.500,00 EUR"
+        }
+      ],
+      "subtotal": "8.000,00 EUR",
+      "totals": {
+        "net": "8.000,00 EUR",
+        "vat_label": "MwSt. (19%)",
+        "vat": "1.520,00 EUR",
+        "gross": "9.520,00 EUR"
+      }
+    }
+  }
+}

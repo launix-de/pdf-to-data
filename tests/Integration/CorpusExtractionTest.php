@@ -182,6 +182,22 @@ final class CorpusExtractionTest extends TestCase
         if (array_key_exists('image_count_max', $expected)) {
             self::assertLessThanOrEqual((int)$expected['image_count_max'], count($images));
         }
+        if (isset($expected['quotation']) && is_array($expected['quotation'])) {
+            $quotation = is_array($salesDocument['quotation'] ?? null) ? $salesDocument['quotation'] : null;
+            self::assertIsArray($quotation, 'Expected quotation model to be extracted.');
+            if (isset($expected['quotation']['schema'])) {
+                self::assertSame($expected['quotation']['schema'], $quotation['schema'] ?? null);
+            }
+            if (isset($expected['quotation']['line_items'])) {
+                self::assertSame($expected['quotation']['line_items'], $quotation['line_items'] ?? null);
+            }
+            if (array_key_exists('subtotal', $expected['quotation'])) {
+                self::assertSame($expected['quotation']['subtotal'], $quotation['subtotal'] ?? null);
+            }
+            if (isset($expected['quotation']['totals'])) {
+                self::assertSame($expected['quotation']['totals'], $quotation['totals'] ?? null);
+            }
+        }
     }
 
     private function normalizeText(string $text): string
