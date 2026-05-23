@@ -113,16 +113,16 @@ final class SalesDocumentExtractor
             }
 
             if (str_starts_with($rowLabel, 'summe netto')) {
-                $totals['net'] = trim((string)$cells[count($cells) - 1]['text']);
+                $totals['net'] = $this->parseDecimal(trim((string)$cells[count($cells) - 1]['text']));
                 continue;
             }
             if (str_starts_with($rowLabel, 'mwst.')) {
                 $totals['vat_label'] = trim((string)$cells[0]['text']);
-                $totals['vat'] = trim((string)$cells[count($cells) - 1]['text']);
+                $totals['vat'] = $this->parseDecimal(trim((string)$cells[count($cells) - 1]['text']));
                 continue;
             }
             if (str_starts_with($rowLabel, 'summe brutto')) {
-                $totals['gross'] = trim((string)$cells[count($cells) - 1]['text']);
+                $totals['gross'] = $this->parseDecimal(trim((string)$cells[count($cells) - 1]['text']));
                 break;
             }
 
@@ -164,17 +164,17 @@ final class SalesDocumentExtractor
             }
             if ($unitPrice !== null || $quantityRaw !== null || $total !== null) {
                 if ($description === '' && $position === null && $unitPrice === null && $quantityRaw === null && $total !== null) {
-                    $subtotal = $total;
+                    $subtotal = $this->parseDecimal($total);
                     continue;
                 }
                 [$quantity, $unit] = $this->splitQuantityAndUnit($quantityRaw);
                 $lineItems[] = [
                     'position' => $position ?? $pendingPosition,
                     'beschreibung' => $description,
-                    'einzelpreis' => $unitPrice,
+                    'einzelpreis' => $this->parseDecimal($unitPrice),
                     'menge' => $quantity,
                     'einheit' => $unit,
-                    'gesamt' => $total,
+                    'gesamt' => $this->parseDecimal($total),
                 ];
                 $currentItemIndex = array_key_last($lineItems);
                 $pendingPosition = null;
@@ -252,7 +252,7 @@ final class SalesDocumentExtractor
     }
 
     /**
-     * @return array{0:?string,1:?string}
+     * @return array{0:int|float|null,1:?string}
      */
     private function splitQuantityAndUnit(?string $value): array
     {
@@ -266,9 +266,42 @@ final class SalesDocumentExtractor
         }
 
         if (preg_match('/^([0-9][0-9.,]*)\s+(.+)$/u', $value, $matches) === 1) {
-            return [trim($matches[1]), trim($matches[2])];
+            return [$this->parseDecimal(trim($matches[1])), trim($matches[2])];
         }
 
-        return [$value, null];
+        return [$this->parseDecimal($value), null];
+    }
+
+    private function parseDecimal(?string $value): int|float|null
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+
+        $value = str_replace(["\xc2\xa0", 'EUR', '€'], ['', '', ''], $value);
+        $value = preg_replace('/[^0-9,.\-]/u', '', $value) ?? '';
+        if ($value === '' || $value === '-' || $value === '.' || $value === ',') {
+            return null;
+        }
+
+        if (str_contains($value, ',') && str_contains($value, '.')) {
+            $value = str_replace('.', '', $value);
+            $value = str_replace(',', '.', $value);
+        } elseif (str_contains($value, ',')) {
+            $value = str_replace('.', '', $value);
+            $value = str_replace(',', '.', $value);
+        }
+
+        if (!is_numeric($value)) {
+            return null;
+        }
+
+        $number = (float)$value;
+        return fmod($number, 1.0) === 0.0 ? (int)$number : $number;
     }
 }

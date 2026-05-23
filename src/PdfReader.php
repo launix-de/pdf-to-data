@@ -6,7 +6,7 @@ namespace Launix\PdfToData;
 
 use InvalidArgumentException;
 use Launix\PdfToData\Contract\ExtractorEngine;
-use Launix\PdfToData\Internal\XtractCliEngine;
+use Launix\PdfToData\Internal\XtractEngine;
 
 final class PdfReader
 {
@@ -24,7 +24,7 @@ final class PdfReader
             throw new InvalidArgumentException('PDF input must not be empty.');
         }
 
-        $this->extractor = $this->engine ?? new XtractCliEngine();
+        $this->extractor = $this->engine ?? new XtractEngine();
         $this->rawDocument = $this->extractor->extractRaw($this->pdfBytes, $this->filename);
         $this->currentDocument = $this->rawDocument;
     }

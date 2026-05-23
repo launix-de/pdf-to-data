@@ -2,12 +2,15 @@
 
 declare(strict_types=1);
 
-require dirname(__DIR__, 2) . '/vendor/autoload.php';
+namespace Launix\PdfToData\Internal;
 
+use Launix\PdfToData\Contract\ExtractorEngine;
+use Launix\PdfToData\NormalizedDocument;
 use Smalot\PdfParser\Parser;
 use Smalot\PdfParser\Page;
 use Smalot\PdfParser\XObject\Image as XObjectImage;
 use Smalot\PdfParser\XObject\Form as XObjectForm;
+use RuntimeException;
 
 /**
  * Legacy xtract engine.
@@ -988,56 +991,50 @@ function mergeOverlappingImageLayers(array $items): array
 }
 
 /**
- * Run an OCR fallback by producing a searchable PDF and recursively invoking this script on it.
+ * Run an OCR fallback by producing a searchable PDF and recursively re-entering the extractor in-process.
  */
-function runOcrFallbackExtraction(string $sourcePdf, string $scriptPath): bool
+function runOcrFallbackExtraction(string $sourcePdf, string $mode, bool $ocrFallbackActive): ?array
 {
+    if ($ocrFallbackActive) {
+        return null;
+    }
+
     $ocrmypdf = trim((string)@shell_exec('command -v ocrmypdf 2>/dev/null'));
     if ($ocrmypdf === '') {
-        return false;
+        return null;
     }
 
     $tmpDir = sys_get_temp_dir() . '/versco-ocr-' . bin2hex(random_bytes(6));
     if (!@mkdir($tmpDir, 0775, true) && !is_dir($tmpDir)) {
-        return false;
+        return null;
     }
 
-    $ocrPdf = $tmpDir . '/ocr.pdf';
-    $ocrCmd = sprintf(
-        '%s --force-ocr --output-type pdf %s %s >/dev/null 2>&1',
-        escapeshellarg($ocrmypdf),
-        escapeshellarg($sourcePdf),
-        escapeshellarg($ocrPdf)
-    );
-    exec($ocrCmd, $_, $ocrCode);
-    if ($ocrCode !== 0 || !is_file($ocrPdf)) {
-        return false;
-    }
+    try {
+        $ocrPdf = $tmpDir . '/ocr.pdf';
+        $ocrCmd = sprintf(
+            '%s --force-ocr --output-type pdf %s %s >/dev/null 2>&1',
+            escapeshellarg($ocrmypdf),
+            escapeshellarg($sourcePdf),
+            escapeshellarg($ocrPdf)
+        );
+        exec($ocrCmd, $_, $ocrCode);
+        if ($ocrCode !== 0 || !is_file($ocrPdf)) {
+            return null;
+        }
 
-    $phpBin = PHP_BINARY ?: 'php';
-    $childCmd = sprintf(
-        'XTRACT_OCR_FALLBACK_ACTIVE=1 %s %s %s >/dev/null 2>&1',
-        escapeshellarg($phpBin),
-        escapeshellarg($scriptPath),
-        escapeshellarg($ocrPdf)
-    );
-    exec('cd ' . escapeshellarg($tmpDir) . ' && ' . $childCmd, $_, $childCode);
-    if ($childCode !== 0) {
-        return false;
+        return xtractRun($ocrPdf, $mode, true);
+    } finally {
+        $items = scandir($tmpDir);
+        if (is_array($items)) {
+            foreach ($items as $item) {
+                if ($item === '.' || $item === '..') {
+                    continue;
+                }
+                @unlink($tmpDir . '/' . $item);
+            }
+        }
+        @rmdir($tmpDir);
     }
-
-    $childJson = $tmpDir . '/out2.json';
-    $childHtml = $tmpDir . '/out2.html';
-    if (!is_file($childJson)) {
-        return false;
-    }
-
-    @copy($childJson, 'out2.json');
-    if (is_file($childHtml)) {
-        @copy($childHtml, 'out2.html');
-    }
-
-    return true;
 }
 
 /**
@@ -1063,7 +1060,7 @@ function extractBboxLayoutTextItems(string $pdfFile, array $pageHeights): array
     }
 
     $items = [];
-    $dom = new DOMDocument();
+    $dom = new \DOMDocument();
     $prevUseErrors = libxml_use_internal_errors(true);
     $loaded = $dom->loadHTML($html, LIBXML_NOWARNING | LIBXML_NOERROR);
     libxml_clear_errors();
@@ -1146,22 +1143,6 @@ function detectMimeFromFilter($filterValue): ?string
 
     return null;
 }
-
-// Usage: php xtract.php <file.pdf>
-if ($argc < 2) {
-    fwrite(STDERR, "Usage: php xtract.php <file.pdf>\n");
-    exit(1);
-}
-
-$pdfFile = $argv[1];
-if (!is_file($pdfFile)) {
-    fwrite(STDERR, "File not found: {$pdfFile}\n");
-    exit(1);
-}
-
-$parser = new Parser();
-// Ensure DataTm includes font id/size for style detection
-$parser->getConfig()->setDataTmFontInfoHasToBeIncluded(true);
 
 // Global scale from PDF font units to CSS px
 // Keep at 1.0 unless you need to uniformly upscale/downscale text.
@@ -1883,7 +1864,43 @@ function extractPageVectorClusters(Page $page): array
     return ['clusters' => $out, 'lines' => $lineItems];
 }
 
-try {
+/**
+ * @return array{meta: array<string,mixed>, pages: array<int,array<string,mixed>>, items: array<int,array<string,mixed>>, html: string}
+ */
+function loadXtractSnapshotFromCurrentDirectory(): array
+{
+    $jsonPath = 'out2.json';
+    $htmlPath = 'out2.html';
+    if (!is_file($jsonPath)) {
+        throw new RuntimeException('xtract did not create out2.json.');
+    }
+
+    $decoded = json_decode((string)file_get_contents($jsonPath), true);
+    if (!is_array($decoded)) {
+        throw new RuntimeException('xtract produced invalid JSON.');
+    }
+
+    return [
+        'meta' => is_array($decoded['meta'] ?? null) ? $decoded['meta'] : [],
+        'pages' => is_array($decoded['pages'] ?? null) ? $decoded['pages'] : [],
+        'items' => is_array($decoded['items'] ?? null) ? $decoded['items'] : [],
+        'html' => is_file($htmlPath) ? (string)file_get_contents($htmlPath) : '',
+    ];
+}
+
+/**
+ * @return array{meta: array<string,mixed>, pages: array<int,array<string,mixed>>, items: array<int,array<string,mixed>>, html: string}
+ */
+function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallbackActive = false): array
+{
+    if (!is_file($pdfFile)) {
+        throw new RuntimeException(sprintf('File not found: %s', $pdfFile));
+    }
+
+    $parser = new Parser();
+    $parser->getConfig()->setDataTmFontInfoHasToBeIncluded(true);
+
+    try {
     $pdf = $parser->parseFile($pdfFile);
     $pages = $pdf->getPages();
 
@@ -2487,10 +2504,10 @@ try {
         }
     }
 
-    if (!$hasSearchableText && getenv('XTRACT_OCR_FALLBACK_ACTIVE') !== '1') {
-        if (runOcrFallbackExtraction($pdfFile, __FILE__)) {
-            fwrite(STDOUT, "OCR fallback extracted searchable text.\n");
-            exit(0);
+    if (!$hasSearchableText) {
+        $ocrResult = runOcrFallbackExtraction($pdfFile, $mode, $ocrFallbackActive);
+        if (is_array($ocrResult)) {
+            return $ocrResult;
         }
     }
 
@@ -2616,7 +2633,7 @@ try {
 
     // Image repeat filter disabled: header/footer cuts below will handle images in those zones.
 
-    $mode = strtolower(trim((string)(getenv('PDF_TO_DATA_MODE') ?: 'normalized')));
+    $mode = strtolower(trim($mode));
     if ($mode === 'raw') {
         $pageCount = count($pageHeights);
         $pageMeta = [];
@@ -2651,7 +2668,21 @@ try {
             'footer_repeated_images' => [],
             'stream_height' => $runningOffset,
         ]);
-        exit(0);
+        return [
+            'meta' => [
+                'mode' => 'raw',
+                'page_count' => $pageCount,
+                'repeat_threshold' => 0,
+                'header_repeated' => [],
+                'footer_repeated' => [],
+                'header_repeated_images' => [],
+                'footer_repeated_images' => [],
+                'stream_height' => $runningOffset,
+            ],
+            'pages' => $pageMeta,
+            'items' => $items,
+            'html' => is_file('out2.html') ? (string)file_get_contents('out2.html') : '',
+        ];
     }
 
     // Detect headers and footers across pages, remove them (except first-page header and last-page footer),
@@ -3736,7 +3767,70 @@ try {
         'pages' => $pageMeta,
         'items' => $jsonItems,
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-} catch (\Throwable $e) {
-    fwrite(STDERR, 'Error: ' . $e->getMessage() . "\n");
-    exit(1);
+
+    return [
+        'meta' => $xtractMeta,
+        'pages' => $pageMeta,
+        'items' => $jsonItems,
+        'html' => implode('', $htmlOut),
+    ];
+    } catch (\Throwable $e) {
+        throw new RuntimeException('xtract failed: ' . $e->getMessage(), 0, $e);
+    }
+}
+
+final class XtractEngine implements ExtractorEngine
+{
+    /**
+     * @param array<string,mixed> $options
+     */
+    public function extractRaw(string $pdfBytes, string $filename, array $options = []): NormalizedDocument
+    {
+        return $this->extractWithMode('raw', $pdfBytes, $filename);
+    }
+
+    /**
+     * @param array<string,mixed> $options
+     */
+    public function extract(string $pdfBytes, string $filename, array $options = []): NormalizedDocument
+    {
+        return $this->extractWithMode('normalized', $pdfBytes, $filename);
+    }
+
+    private function extractWithMode(string $mode, string $pdfBytes, string $filename): NormalizedDocument
+    {
+        $tmpDir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pdf-to-data-' . bin2hex(random_bytes(8));
+        if (!mkdir($tmpDir, 0775, true) && !is_dir($tmpDir)) {
+            throw new RuntimeException(sprintf('Could not create temp directory: %s', $tmpDir));
+        }
+
+        $cwd = getcwd();
+        try {
+            $pdfPath = $tmpDir . DIRECTORY_SEPARATOR . ($filename !== '' ? basename($filename) : 'document.pdf');
+            file_put_contents($pdfPath, $pdfBytes);
+            chdir($tmpDir);
+            $result = xtractRun($pdfPath, $mode);
+
+            return new NormalizedDocument(
+                is_array($result['meta'] ?? null) ? $result['meta'] : [],
+                is_array($result['pages'] ?? null) ? $result['pages'] : [],
+                is_array($result['items'] ?? null) ? $result['items'] : [],
+                (string)($result['html'] ?? '')
+            );
+        } finally {
+            if (is_string($cwd) && $cwd !== '') {
+                @chdir($cwd);
+            }
+            $items = scandir($tmpDir);
+            if (is_array($items)) {
+                foreach ($items as $item) {
+                    if ($item === '.' || $item === '..') {
+                        continue;
+                    }
+                    @unlink($tmpDir . DIRECTORY_SEPARATOR . $item);
+                }
+            }
+            @rmdir($tmpDir);
+        }
+    }
 }

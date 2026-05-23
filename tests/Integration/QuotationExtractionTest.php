@@ -29,30 +29,30 @@ final class QuotationExtractionTest extends TestCase
                 [
                     'position' => '1.',
                     'beschreibung' => "Montageleistung\nMontageleistung nach\nStundenabrechnung",
-                    'einzelpreis' => '55,00 EUR',
-                    'menge' => '100',
+                    'einzelpreis' => 55,
+                    'menge' => 100,
                     'einheit' => 'h',
-                    'gesamt' => '5.500,00 EUR',
+                    'gesamt' => 5500,
                 ],
                 [
                     'position' => null,
                     'beschreibung' => 'Schraube',
-                    'einzelpreis' => '0,25 EUR',
-                    'menge' => '10000',
+                    'einzelpreis' => 0.25,
+                    'menge' => 10000,
                     'einheit' => 'Stück',
-                    'gesamt' => '2.500,00 EUR',
+                    'gesamt' => 2500,
                 ],
             ],
             $quotation['line_items'] ?? null
         );
 
-        self::assertSame('8.000,00 EUR', $quotation['subtotal'] ?? null);
+        self::assertSame(8000, $quotation['subtotal'] ?? null);
         self::assertSame(
             [
-                'net' => '8.000,00 EUR',
+                'net' => 8000,
                 'vat_label' => 'MwSt. (19%)',
-                'vat' => '1.520,00 EUR',
-                'gross' => '9.520,00 EUR',
+                'vat' => 1520,
+                'gross' => 9520,
             ],
             $quotation['totals'] ?? null
         );
