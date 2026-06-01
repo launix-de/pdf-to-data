@@ -1,0 +1,492 @@
+{
+    "normalized": {
+        "pages_count": 1,
+        "elements_count": 2937,
+        "meta": {
+            "page_count": 1,
+            "repeat_threshold": 42,
+            "header_repeated": [
+                "angebot - nr. {n}/{n}/{n}/of",
+                "für: km okno s.c. {n} angebot vom: {n}"
+            ],
+            "footer_repeated": [
+                "ausdruckdatum: {n} bearbeitet von urszula sok pamproject seite {n} / {n}."
+            ]
+        },
+        "type_counts": {
+            "image": 263,
+            "line": 1055,
+            "text": 1619
+        },
+        "text_contains": [
+            "Angebot - Nr. 006952/01/2026/OF",
+            "KM OKNO s.c Kleszcz Bogusław, Kleszcz - Wójcik Ewa",
+            "PVC-SCHREINERARBEITEN",
+            "Zusammenfassung",
+            "Fenstern und Türen PVC",
+            "Gesamtgewicht: 1514,6 kg",
+            "PamProject   Seite 69 / 69."
+        ],
+        "text_not_contains": [
+            "PamProject   Seite 2 / 69.",
+            "PamProject   Seite 3 / 69.",
+            "PamProject   Seite 68 / 69."
+        ],
+        "html_contains": [
+            "class=\"pdf-fragment\"",
+            "class=\"item txt\"",
+            "class=\"item img\""
+        ]
+    },
+    "sales_document": {
+        "text_contains": [
+            "Angebot - Nr. 006952/01/2026/OF",
+            "Zusammenfassung",
+            "Fenstern und Türen PVC",
+            "Gesamtgewicht: 1514,6 kg"
+        ],
+        "image_count": 318,
+        "quotation": {
+            "schema": [
+                "position",
+                "beschreibung",
+                "einzelpreis",
+                "menge",
+                "einheit",
+                "gesamt"
+            ],
+            "line_items_count": 68,
+            "subtotal": 8729.31,
+            "totals": {
+                "net": 8729.31
+            },
+            "line_items_by_position": {
+                "1": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 764.8,
+                    "menge": 1,
+                    "gesamt": 764.8,
+                    "detail_html_has_img": true,
+                    "detail_html_contains": [
+                        "PVC-SCHREINERARBEITEN",
+                        "TRANSPORTLEISTE",
+                        "DÜBELBOHRUNG LINKS+RECHTS"
+                    ],
+                    "detail_html_not_contains": [
+                        "PamProject",
+                        "Angebot - Nr.",
+                        "Ausdruckdatum:"
+                    ]
+                },
+                "2": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.54,
+                    "menge": 2,
+                    "gesamt": 19.08,
+                    "detail_html_has_img": true,
+                    "detail_html_not_contains": [
+                        "PamProject",
+                        "Angebot - Nr.",
+                        "Ausdruckdatum:"
+                    ]
+                },
+                "3": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.18,
+                    "menge": 1,
+                    "gesamt": 5.18
+                },
+                "4": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.06,
+                    "menge": 1,
+                    "gesamt": 9.06
+                },
+                "5": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "6": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "7": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 2027.87,
+                    "menge": 1,
+                    "gesamt": 2027.87
+                },
+                "8": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 16.24,
+                    "menge": 2,
+                    "gesamt": 32.48
+                },
+                "9": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 11.94,
+                    "menge": 1,
+                    "gesamt": 11.94
+                },
+                "10": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 20.89,
+                    "menge": 1,
+                    "gesamt": 20.89
+                },
+                "11": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "12": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "13": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 319.33,
+                    "menge": 1,
+                    "gesamt": 319.33
+                },
+                "14": {
+                    "beschreibung_first": "Rahmenverbreiterung",
+                    "einzelpreis": 6.57,
+                    "menge": 1,
+                    "gesamt": 6.57
+                },
+                "15": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.89,
+                    "menge": 2,
+                    "gesamt": 11.78
+                },
+                "16": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 1.58,
+                    "menge": 1,
+                    "gesamt": 1.58
+                },
+                "17": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 2.77,
+                    "menge": 1,
+                    "gesamt": 2.77
+                },
+                "18": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "19": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "20": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 541.89,
+                    "menge": 1,
+                    "gesamt": 541.89
+                },
+                "21": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 10.13,
+                    "menge": 2,
+                    "gesamt": 20.26
+                },
+                "22": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.21,
+                    "menge": 1,
+                    "gesamt": 5.21
+                },
+                "23": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.12,
+                    "menge": 1,
+                    "gesamt": 9.12
+                },
+                "24": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "25": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "26": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 674.81,
+                    "menge": 1,
+                    "gesamt": 674.81
+                },
+                "27": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 10.13,
+                    "menge": 2,
+                    "gesamt": 20.26
+                },
+                "28": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.21,
+                    "menge": 1,
+                    "gesamt": 5.21
+                },
+                "29": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.12,
+                    "menge": 1,
+                    "gesamt": 9.12
+                },
+                "30": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "31": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "32": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 717.22,
+                    "menge": 1,
+                    "gesamt": 717.22
+                },
+                "33": {
+                    "beschreibung_first": "Rahmenverbreiterung",
+                    "einzelpreis": 12.35,
+                    "menge": 1,
+                    "gesamt": 12.35
+                },
+                "34": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.98,
+                    "menge": 2,
+                    "gesamt": 19.96
+                },
+                "35": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.18,
+                    "menge": 1,
+                    "gesamt": 5.18
+                },
+                "36": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.06,
+                    "menge": 1,
+                    "gesamt": 9.06
+                },
+                "37": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "38": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "39": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 674.81,
+                    "menge": 1,
+                    "gesamt": 674.81
+                },
+                "40": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 10.13,
+                    "menge": 2,
+                    "gesamt": 20.26
+                },
+                "41": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.21,
+                    "menge": 1,
+                    "gesamt": 5.21
+                },
+                "42": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.12,
+                    "menge": 1,
+                    "gesamt": 9.12
+                },
+                "43": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "44": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "45": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 748.25,
+                    "menge": 1,
+                    "gesamt": 748.25
+                },
+                "46": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.35,
+                    "menge": 2,
+                    "gesamt": 18.7
+                },
+                "47": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 6.94,
+                    "menge": 1,
+                    "gesamt": 6.94
+                },
+                "48": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 12.14,
+                    "menge": 1,
+                    "gesamt": 12.14
+                },
+                "49": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "50": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "51": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 423.67,
+                    "menge": 1,
+                    "gesamt": 423.67
+                },
+                "52": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.38,
+                    "menge": 2,
+                    "gesamt": 18.76
+                },
+                "53": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 3.33,
+                    "menge": 1,
+                    "gesamt": 3.33
+                },
+                "54": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.85,
+                    "menge": 1,
+                    "gesamt": 5.85
+                },
+                "55": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "56": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "57": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 674.81,
+                    "menge": 1,
+                    "gesamt": 674.81
+                },
+                "58": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 10.13,
+                    "menge": 2,
+                    "gesamt": 20.26
+                },
+                "59": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.21,
+                    "menge": 1,
+                    "gesamt": 5.21
+                },
+                "60": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.12,
+                    "menge": 1,
+                    "gesamt": 9.12
+                },
+                "61": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "62": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                },
+                "63": {
+                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "einzelpreis": 671.35,
+                    "menge": 1,
+                    "gesamt": 671.35
+                },
+                "64": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 10.13,
+                    "menge": 2,
+                    "gesamt": 20.26
+                },
+                "65": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 5.18,
+                    "menge": 1,
+                    "gesamt": 5.18
+                },
+                "66": {
+                    "beschreibung_first": "Elemente/Profile [m]",
+                    "einzelpreis": 9.06,
+                    "menge": 1,
+                    "gesamt": 9.06
+                },
+                "67": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 2.52,
+                    "menge": 2,
+                    "gesamt": 5.04
+                },
+                "68": {
+                    "beschreibung_first": "Elemente/Profile [St]",
+                    "einzelpreis": 0.13,
+                    "menge": 20,
+                    "gesamt": 2.6
+                }
+            }
+        }
+    }
+}

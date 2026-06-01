@@ -43,37 +43,51 @@ final class XtractNormalizationTest extends TestCase
         self::assertStringNotContainsString('repeated header', $text);
         self::assertSame(1, substr_count($text, 'repeated footer'));
 
-        self::assertNotEmpty($document->pages());
+        self::assertCount(1, $document->pages());
+        self::assertSame(0, $document->pages()[0]['page_index'] ?? null);
         self::assertGreaterThan(0, count($document->elements()));
         self::assertGreaterThan(0, (float)($document->meta()['stream_height'] ?? 0));
+        self::assertSame([0], array_values(array_unique(array_map(
+            static fn(array $element): int => (int)($element['page_index'] ?? -1),
+            $document->elements()
+        ))));
     }
 
-    public function testSalesDocumentExtractionUsesNormalizedElements(): void
+    public function testItPreservesOfferPositionAnchorsInTheConsolidatedStream(): void
     {
-        $pdf = SyntheticPdfFactory::multiPageDocument([
-            [
-                'header' => 'REPEATED HEADER',
-                'body' => ['Offer 1001', 'Window White PVC'],
-                'footer' => 'REPEATED FOOTER',
-            ],
-            [
-                'header' => 'REPEATED HEADER',
-                'body' => ['Offer 1002', 'Door Anthracite'],
-                'footer' => 'REPEATED FOOTER',
-            ],
-        ]);
+        $fixture = dirname(__DIR__) . '/Fixtures/public/006952_01_2026_OF.pdf';
+        self::assertFileExists($fixture);
 
-        $reader = PdfReader::fromString($pdf, 'sales.pdf');
-        $normalized = $reader->removeFooters();
-        $salesDocument = $reader->extractSalesDocument();
-        $normalizedText = $this->extractText($normalized->elements());
-        $text = $this->normalize(implode(' ', array_map('strval', $salesDocument['text'] ?? [])));
+        $reader = PdfReader::fromFile($fixture);
+        $document = $reader->removeFooters();
+        $positions = [];
+        $repeatedFeatureLines = [
+            'RC2' => 0,
+            'SCHEIBE UMLAUFEND EINGEKLEBT' => 0,
+            'SCHWARZE DICHTUNG' => 0,
+            'WARME KANTE SCHWARZ' => 0,
+            'TRANSPORTLEISTE' => 0,
+            'TRANSPORTGURTE' => 0,
+            'DÜBELBOHRUNG LINKS+RECHTS' => 0,
+        ];
+        foreach ($document->elements() as $element) {
+            if (($element['type'] ?? '') !== 'text') {
+                continue;
+            }
+            $text = (string)($element['text'] ?? '');
+            if (preg_match('/\bPos\.\s*(\d+)\./u', (string)($element['text'] ?? ''), $matches) === 1) {
+                $positions[(int)$matches[1]] = true;
+            }
+            if (array_key_exists($text, $repeatedFeatureLines)) {
+                $repeatedFeatureLines[$text]++;
+            }
+        }
 
-        self::assertSame($normalizedText, $text);
-        self::assertStringContainsString('window white pvc', $text);
-        self::assertStringContainsString('door anthracite', $text);
-        self::assertSame(1, substr_count($text, 'repeated header'));
-        self::assertSame(1, substr_count($text, 'repeated footer'));
+        ksort($positions, SORT_NUMERIC);
+        self::assertSame(range(1, 68), array_keys($positions));
+        foreach ($repeatedFeatureLines as $label => $count) {
+            self::assertLessThanOrEqual(2, $count, sprintf('Repeated feature line still duplicated in stream: %s', $label));
+        }
     }
 
     /**

@@ -182,20 +182,76 @@ final class CorpusExtractionTest extends TestCase
         if (array_key_exists('image_count_max', $expected)) {
             self::assertLessThanOrEqual((int)$expected['image_count_max'], count($images));
         }
-        if (isset($expected['quotation']) && is_array($expected['quotation'])) {
+        if (array_key_exists('quotation', $expected)) {
+            $expectedQuotation = $expected['quotation'];
             $quotation = is_array($salesDocument['quotation'] ?? null) ? $salesDocument['quotation'] : null;
-            self::assertIsArray($quotation, 'Expected quotation model to be extracted.');
-            if (isset($expected['quotation']['schema'])) {
-                self::assertSame($expected['quotation']['schema'], $quotation['schema'] ?? null);
+
+            if ($expectedQuotation === null) {
+                self::assertNull($salesDocument['quotation'] ?? null);
+                return;
             }
-            if (isset($expected['quotation']['line_items'])) {
-                self::assertSame($expected['quotation']['line_items'], $quotation['line_items'] ?? null);
-            }
-            if (array_key_exists('subtotal', $expected['quotation'])) {
-                self::assertSame($expected['quotation']['subtotal'], $quotation['subtotal'] ?? null);
-            }
-            if (isset($expected['quotation']['totals'])) {
-                self::assertSame($expected['quotation']['totals'], $quotation['totals'] ?? null);
+
+            if (is_array($expectedQuotation)) {
+                self::assertIsArray($quotation, 'Expected quotation model to be extracted.');
+                if (isset($expectedQuotation['schema'])) {
+                    self::assertSame($expectedQuotation['schema'], $quotation['schema'] ?? null);
+                }
+                if (array_key_exists('line_items_count', $expectedQuotation)) {
+                    self::assertCount((int)$expectedQuotation['line_items_count'], $quotation['line_items'] ?? []);
+                }
+                if (isset($expectedQuotation['line_items'])) {
+                    self::assertSame($expectedQuotation['line_items'], $quotation['line_items'] ?? null);
+                }
+                if (isset($expectedQuotation['line_items_by_position']) && is_array($expectedQuotation['line_items_by_position'])) {
+                    $actualByPosition = [];
+                    foreach (($quotation['line_items'] ?? []) as $lineItem) {
+                        $position = (string)($lineItem['position'] ?? '');
+                        if ($position === '') {
+                            continue;
+                        }
+                        $actualByPosition[$position] = $lineItem;
+                    }
+                    foreach ($expectedQuotation['line_items_by_position'] as $position => $expectedLineItem) {
+                        $position = (string)$position;
+                        self::assertArrayHasKey($position, $actualByPosition, sprintf('Missing quotation position %s', $position));
+                        self::assertIsArray($expectedLineItem);
+                        foreach ($expectedLineItem as $key => $expectedValue) {
+                            if ((string)$key === 'beschreibung_first') {
+                                $actualDescription = (string)($actualByPosition[$position]['beschreibung'] ?? '');
+                                $actualFirstLine = trim((string)strtok($actualDescription, "\n"));
+                                self::assertSame($expectedValue, $actualFirstLine, sprintf('Mismatch for quotation position %s field %s', $position, (string)$key));
+                                continue;
+                            }
+                            if ((string)$key === 'detail_html_contains' && is_array($expectedValue)) {
+                                $actualDetailHtml = (string)($actualByPosition[$position]['detail_html'] ?? '');
+                                foreach ($expectedValue as $needle) {
+                                    self::assertStringContainsString((string)$needle, $actualDetailHtml, sprintf('Missing detail_html text for quotation position %s', $position));
+                                }
+                                continue;
+                            }
+                            if ((string)$key === 'detail_html_not_contains' && is_array($expectedValue)) {
+                                $actualDetailHtml = (string)($actualByPosition[$position]['detail_html'] ?? '');
+                                foreach ($expectedValue as $needle) {
+                                    self::assertStringNotContainsString((string)$needle, $actualDetailHtml, sprintf('Unexpected detail_html text for quotation position %s', $position));
+                                }
+                                continue;
+                            }
+                            if ((string)$key === 'detail_html_has_img') {
+                                $actualDetailHtml = (string)($actualByPosition[$position]['detail_html'] ?? '');
+                                self::assertSame((bool)$expectedValue, str_contains($actualDetailHtml, '<img'), sprintf('Mismatch for quotation position %s field %s', $position, (string)$key));
+                                continue;
+                            }
+                            self::assertArrayHasKey((string)$key, $actualByPosition[$position]);
+                            self::assertSame($expectedValue, $actualByPosition[$position][(string)$key], sprintf('Mismatch for quotation position %s field %s', $position, (string)$key));
+                        }
+                    }
+                }
+                if (array_key_exists('subtotal', $expectedQuotation)) {
+                    self::assertSame($expectedQuotation['subtotal'], $quotation['subtotal'] ?? null);
+                }
+                if (isset($expectedQuotation['totals'])) {
+                    self::assertSame($expectedQuotation['totals'], $quotation['totals'] ?? null);
+                }
             }
         }
     }

@@ -101,7 +101,9 @@ final class PdfReader
     }
 
     /**
-     * Build a higher-level sales-document payload from the current element list.
+     * Build a higher-level sales-document payload from the current document state.
+     *
+     * After `removeFooters()` this means the consolidated one-page stream.
      *
      * @return array<string,mixed>
      */

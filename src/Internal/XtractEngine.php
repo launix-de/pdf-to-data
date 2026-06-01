@@ -33,6 +33,291 @@ use RuntimeException;
 const FONT_PX_SCALE = 1.0; // Global scale from PDF units to CSS px for text rendering
 
 /**
+ * Render positioned extraction elements back into absolute-positioned HTML.
+ *
+ * @param array<int,array<string,mixed>> $items
+ * @param array{x: float|int, y: float|int, w: float|int, h: float|int}|null $aabb
+ */
+function renderElementsHtml(array $items, ?array $aabb = null): string
+{
+    [$fragmentHtml, $width, $height] = buildRenderedElementsFragment($items, $aabb);
+
+    return '<!doctype html><html><head><meta charset="utf-8"><style>'
+        . 'body{margin:0;background:#f3f3f3;font-family:Arial,sans-serif;}'
+        . '.pdf-fragment{position:relative;margin:0 auto;background:#fff;overflow:hidden;}'
+        . '.item{position:absolute;box-sizing:border-box;}'
+        . '.txt{white-space:pre;line-height:1;z-index:3;}'
+        . '.img{display:block;z-index:1;}'
+        . '.line{display:block;z-index:2;}'
+        . '</style></head><body><div class="pdf-fragment" style="width:' . $width . 'px;height:' . $height . 'px;">'
+        . $fragmentHtml
+        . '</div></body></html>';
+}
+
+/**
+ * Render positioned extraction elements into a HTML fragment.
+ *
+ * @param array<int,array<string,mixed>> $items
+ * @param array{x: float|int, y: float|int, w: float|int, h: float|int}|null $aabb
+ */
+function renderElementsHtmlFragment(array $items, ?array $aabb = null): string
+{
+    [$fragmentHtml, $width, $height] = buildRenderedElementsFragment($items, $aabb);
+
+    return '<div class="pdf-fragment" style="position:relative;overflow:hidden;width:' . $width . 'px;height:' . $height . 'px;">'
+        . $fragmentHtml
+        . '</div>';
+}
+
+/**
+ * Collapse large empty vertical gaps in a positioned stream.
+ *
+ * @param array<int,array<string,mixed>> $items
+ * @return array<int,array<string,mixed>>
+ */
+function compactVerticalWhitespace(array $items, float $threshold = 48.0, float $keepGap = 12.0): array
+{
+    if ($items === []) {
+        return $items;
+    }
+
+    $bands = [];
+    foreach ($items as $item) {
+        if (($item['type'] ?? '') === 'line') {
+            continue;
+        }
+        if (($item['type'] ?? '') === 'text' && trim((string)($item['text'] ?? '')) === '') {
+            continue;
+        }
+
+        $top = (float)($item['top'] ?? 0.0);
+        $height = ($item['type'] ?? '') === 'text'
+            ? max(0.0, (float)($item['font_size'] ?? 0.0))
+            : max(0.0, (float)($item['height'] ?? 0.0));
+        $bottom = $top + max($height, 1.0);
+        $bands[] = [$top, $bottom];
+    }
+
+    if ($bands === []) {
+        return $items;
+    }
+
+    usort($bands, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+    $mergedBands = [];
+    foreach ($bands as [$top, $bottom]) {
+        if ($mergedBands === [] || $top > $mergedBands[count($mergedBands) - 1][1]) {
+            $mergedBands[] = [$top, $bottom];
+            continue;
+        }
+        $mergedBands[count($mergedBands) - 1][1] = max($mergedBands[count($mergedBands) - 1][1], $bottom);
+    }
+
+    $shifts = [];
+    $accumulatedShift = 0.0;
+    for ($i = 1; $i < count($mergedBands); $i++) {
+        $gap = $mergedBands[$i][0] - $mergedBands[$i - 1][1];
+        if ($gap <= $threshold) {
+            continue;
+        }
+        $accumulatedShift += $gap - $keepGap;
+        $shifts[] = [
+            'from' => $mergedBands[$i][0],
+            'shift' => $accumulatedShift,
+        ];
+    }
+
+    if ($shifts === []) {
+        return $items;
+    }
+
+    foreach ($items as &$item) {
+        $top = (float)($item['top'] ?? 0.0);
+        $shift = 0.0;
+        foreach ($shifts as $rule) {
+            if ($top >= $rule['from']) {
+                $shift = $rule['shift'];
+            } else {
+                break;
+            }
+        }
+        if ($shift <= 0.0) {
+            continue;
+        }
+        $item['top'] = max(0.0, $top - $shift);
+        if (isset($item['page_local_top'])) {
+            $item['page_local_top'] = max(0.0, (float)$item['page_local_top'] - $shift);
+        }
+    }
+    unset($item);
+
+    return $items;
+}
+
+/**
+ * Drop redundant page-sized overlay images when the same page already contains extracted text content.
+ *
+ * @param array<int,array<string,mixed>> $items
+ * @param array<int,float|int> $pageWidths
+ * @param array<int,array<string,mixed>> $pageMeta
+ * @return array<int,array<string,mixed>>
+ */
+function removeRedundantFullPageImages(array $items, array $pageWidths, array $pageMeta): array
+{
+    $textCountsByPage = [];
+    foreach ($items as $item) {
+        if (($item['type'] ?? '') !== 'text') {
+            continue;
+        }
+        if (trim((string)($item['text'] ?? '')) === '') {
+            continue;
+        }
+        $pi = (int)($item['page_index'] ?? -1);
+        $textCountsByPage[$pi] = ($textCountsByPage[$pi] ?? 0) + 1;
+    }
+
+    $filtered = [];
+    foreach ($items as $item) {
+        if (($item['type'] ?? '') !== 'image') {
+            $filtered[] = $item;
+            continue;
+        }
+
+        $pi = (int)($item['page_index'] ?? -1);
+        $pageWidth = (float)($pageWidths[$pi] ?? 0.0);
+        $pageHeight = (float)($pageMeta[$pi]['content_height'] ?? $item['page_height'] ?? 0.0);
+        $left = (float)($item['left'] ?? $item['x'] ?? 0.0);
+        $top = (float)($item['top'] ?? 0.0);
+        $offsetTop = (float)($pageMeta[$pi]['offset_top'] ?? 0.0);
+        $localTop = $top - $offsetTop;
+        $width = max(0.0, (float)($item['width'] ?? 0.0));
+        $height = max(0.0, (float)($item['height'] ?? 0.0));
+
+        $isRedundantFullPageOverlay =
+            ($textCountsByPage[$pi] ?? 0) >= 8
+            && $pageWidth > 0.0
+            && $pageHeight > 0.0
+            && $width >= ($pageWidth * 0.9)
+            && (
+                $height >= ($pageHeight * 0.85)
+                || $height >= ($pageHeight * 0.45)
+                || $height >= 160.0
+            );
+
+        if ($isRedundantFullPageOverlay) {
+            continue;
+        }
+
+        $filtered[] = $item;
+    }
+
+    return $filtered;
+}
+
+/**
+ * Render positioned elements and return the inner HTML plus fragment size.
+ *
+ * @param array<int,array<string,mixed>> $items
+ * @param array{x: float|int, y: float|int, w: float|int, h: float|int}|null $aabb
+ * @return array{0:string,1:int,2:int}
+ */
+function buildRenderedElementsFragment(array $items, ?array $aabb = null): array
+{
+    if ($items === []) {
+        return ['', 0, 0];
+    }
+
+    $offsetLeft = 0.0;
+    $offsetTop = 0.0;
+    $canvasWidth = 0.0;
+    $canvasHeight = 0.0;
+    $cropRight = null;
+    $cropBottom = null;
+    if ($aabb !== null) {
+        $offsetLeft = (float)($aabb['x'] ?? 0.0);
+        $offsetTop = (float)($aabb['y'] ?? 0.0);
+        $canvasWidth = max(0.0, (float)($aabb['w'] ?? 0.0));
+        $canvasHeight = max(0.0, (float)($aabb['h'] ?? 0.0));
+        $cropRight = $offsetLeft + $canvasWidth;
+        $cropBottom = $offsetTop + $canvasHeight;
+    } else {
+        $offsetLeft = INF;
+        $offsetTop = INF;
+        foreach ($items as $item) {
+            $offsetLeft = min($offsetLeft, (float)($item['left'] ?? $item['x'] ?? 0.0));
+            $offsetTop = min($offsetTop, (float)($item['top'] ?? 0.0));
+        }
+        if (!is_finite($offsetLeft)) {
+            $offsetLeft = 0.0;
+        }
+        if (!is_finite($offsetTop)) {
+            $offsetTop = 0.0;
+        }
+    }
+
+    $renderedRight = 0.0;
+    $renderedBottom = 0.0;
+    $htmlOut = [];
+
+    foreach ($items as $item) {
+        $rawLeft = (float)($item['left'] ?? $item['x'] ?? 0.0);
+        $rawTop = (float)($item['top'] ?? 0.0);
+        $itemType = (string)($item['type'] ?? '');
+        $itemWidth = max(0.0, (float)($item['width'] ?? 0.0));
+        $itemHeight = max(0.0, (float)($item['height'] ?? 0.0));
+        if ($itemType === 'text') {
+            $itemHeight = max($itemHeight, (float)($item['font_size'] ?? 12.0));
+            $itemWidth = max(
+                $itemWidth,
+                mb_strlen((string)($item['text'] ?? ''), 'UTF-8') * max(1.0, (float)($item['font_size'] ?? 12.0)) * 0.6
+            );
+        }
+        if ($cropRight !== null && $cropBottom !== null) {
+            $itemRight = $rawLeft + $itemWidth;
+            $itemBottom = $rawTop + $itemHeight;
+            if ($itemRight <= $offsetLeft || $rawLeft >= $cropRight || $itemBottom <= $offsetTop || $rawTop >= $cropBottom) {
+                continue;
+            }
+        }
+
+        $left = max(0.0, $rawLeft - $offsetLeft);
+        $top = max(0.0, $rawTop - $offsetTop);
+
+        if ($itemType === 'text') {
+            $fs = (float)($item['font_size'] ?? 12.0);
+            $weight = !empty($item['bold']) ? '700' : '400';
+            $htmlOut[] = '<div class="item txt" style="left:' . $left . 'px;top:' . $top . 'px;font-size:' . $fs . 'px;font-weight:' . $weight . ';">' . htmlspecialchars((string)($item['text'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</div>';
+            $renderedRight = max($renderedRight, $left + $itemWidth);
+            $renderedBottom = max($renderedBottom, $top + $fs);
+            continue;
+        }
+
+        if ($itemType === 'image') {
+            $style = 'left:' . $left . 'px;top:' . $top . 'px;';
+            if ($itemWidth > 0.0) $style .= 'width:' . $itemWidth . 'px;';
+            if ($itemHeight > 0.0) $style .= 'height:' . $itemHeight . 'px;';
+            $htmlOut[] = '<img class="item img" style="' . $style . '" src="' . htmlspecialchars((string)($item['url'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '" alt="image" />';
+            $renderedRight = max($renderedRight, $left + $itemWidth);
+            $renderedBottom = max($renderedBottom, $top + $itemHeight);
+            continue;
+        }
+
+        if ($itemType === 'line') {
+            $color = htmlspecialchars((string)($item['color'] ?? '#000'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            $htmlOut[] = '<div class="item line" style="left:' . $left . 'px;top:' . $top . 'px;width:' . $itemWidth . 'px;height:' . $itemHeight . 'px;background:' . $color . ';"></div>';
+            $renderedRight = max($renderedRight, $left + $itemWidth);
+            $renderedBottom = max($renderedBottom, $top + $itemHeight);
+        }
+    }
+
+    if ($aabb !== null) {
+        $renderedRight = $canvasWidth;
+        $renderedBottom = $canvasHeight;
+    }
+
+    return [implode('', $htmlOut), (int)ceil($renderedRight), (int)ceil($renderedBottom)];
+}
+
+/**
  * Determine whether a PDF font name hints at a bold typeface.
  */
 function isBoldFont(?string $fontName): bool
@@ -2761,16 +3046,20 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
             }
             $norm = $normalize_line($joined);
             if ($yLine >= $ph - $topZone) {
-                $headerLinesByPage[$pi][] = ['norm'=>$norm,'y'=>$yLine,'fs'=>$fsMax];
+                $headerLinesByPage[$pi][] = ['norm'=>$norm,'raw'=>$joined,'y'=>$yLine,'fs'=>$fsMax];
                 if ($norm !== '') { $headerNormCounts[$norm] = ($headerNormCounts[$norm] ?? 0) + 1; }
                 if (
                     preg_match('/\b(?:pos|poz)\.?(?:\s*nr\.?)?\s*\d{1,3}\b/ui', $joined) === 1
                     || preg_match('/^\s*0\d{3}\s+[A-Z0-9]{8,}\s+\d{1,3}\b/u', $joined) === 1
                 ) {
-                    $topAnchorLinesByPage[$pi][] = ['y' => $yLine, 'fs' => $fsMax];
+                    $topAnchorLinesByPage[$pi][] = [
+                        'y' => $yLine,
+                        'fs' => $fsMax,
+                        'top' => max(0.0, $ph - $yLine - $fsMax),
+                    ];
                 }
             } elseif ($yLine <= $bottomZone) {
-                $footerLinesByPage[$pi][] = ['norm'=>$norm,'y'=>$yLine,'fs'=>$fsMax];
+                $footerLinesByPage[$pi][] = ['norm'=>$norm,'raw'=>$joined,'y'=>$yLine,'fs'=>$fsMax];
                 if ($norm !== '') { $footerNormCounts[$norm] = ($footerNormCounts[$norm] ?? 0) + 1; }
             }
         }
@@ -2814,10 +3103,135 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
         return (bool)preg_match('/\b(datum|date|auftrags|angebot|rechnung|best[aä]tigung|auftragsbestaetigung|kunde|customer)\b/u', $norm);
     };
     foreach ($headerNormCounts as $norm=>$cnt) { if ($isLikelyHeader($norm)) $headerRepeated[$norm] = true; }
+    // Offer content often repeats at the top of pages as part of the actual line-item payload.
+    // Do not classify those table/position rows as removable page furniture.
+    $isLikelyQuotationContentHeader = function (string $norm): bool {
+        return (bool)preg_match(
+            '/\b(?:'
+            . 'pos\.?\s*\{n\}'
+            . '|nettopreise'
+            . '|preis nach'
+            . '|rabatt'
+            . '|menge'
+            . '|nettowert'
+            . '|mwst'
+            . '|bruttowert'
+            . '|ansicht von innen'
+            . ')\b/u',
+            $norm
+        );
+    };
+    foreach (array_keys($headerRepeated) as $norm) {
+        if ($isLikelyQuotationContentHeader($norm)) {
+            unset($headerRepeated[$norm]);
+        }
+    }
     $footerRepeated = [];
     foreach ($footerNormCounts as $norm=>$cnt) { if ($cnt >= $repeatThreshold) $footerRepeated[$norm] = true; }
     // Also include page number lines like "seite: {n}" or "page {n}"
     foreach ($footerNormCounts as $norm=>$cnt) { if (preg_match('/\b(seite|page)\s*[:]?\s*\{n\}\b/u', $norm)) $footerRepeated[$norm] = true; }
+
+    $canonicalHeaderText = static function (string $value): string {
+        $value = preg_replace('/\s+/u', ' ', trim($value)) ?? trim($value);
+        return mb_strtolower($value, 'UTF-8');
+    };
+    $canonicalHeaderCounts = [];
+    $canonicalHeaderPages = [];
+    foreach ($headerLinesByPage as $pi => $lines) {
+        foreach ($lines as $ln) {
+            $raw = trim((string)($ln['raw'] ?? ''));
+            if ($raw === '') {
+                continue;
+            }
+            $canonical = $canonicalHeaderText($raw);
+            $canonicalHeaderCounts[$canonical] = ($canonicalHeaderCounts[$canonical] ?? 0) + 1;
+            $canonicalHeaderPages[$canonical][$pi] = true;
+        }
+    }
+
+    $repeatedFeatureHeaderPageMap = [];
+    $featureHeaderCandidates = [];
+    foreach ($headerLinesByPage as $pi => $lines) {
+        foreach ($lines as $ln) {
+            $norm = (string)($ln['norm'] ?? '');
+            $raw = trim((string)($ln['raw'] ?? ''));
+            $canonicalRaw = $canonicalHeaderText($raw);
+            if ($norm === '' || $raw === '' || !empty($headerRepeated[$norm])) {
+                continue;
+            }
+            if (($canonicalHeaderCounts[$canonicalRaw] ?? 0) < 3) {
+                continue;
+            }
+            if (preg_match('/^(?:angebot - nr\.|ausdruckdatum:|bearbeitet von|pamproject|preis nach|rabatt|menge|nettowert|mwst|bruttowert|nettopreise eur|ansicht von innen|0%)/ui', $norm) === 1) {
+                continue;
+            }
+            if ($raw !== mb_strtoupper($raw, 'UTF-8')) {
+                continue;
+            }
+            $featureHeaderCandidates[$norm] = true;
+            $repeatedFeatureHeaderPageMap[$canonicalRaw][$pi] = true;
+        }
+    }
+
+    $repeatedFeatureHeaderKeepPages = [];
+    foreach ($repeatedFeatureHeaderPageMap as $canonicalRaw => $pagesForNorm) {
+        $pageIndexes = array_keys($pagesForNorm);
+        sort($pageIndexes, SORT_NUMERIC);
+        if ($pageIndexes === []) {
+            continue;
+        }
+        $repeatedFeatureHeaderKeepPages[$canonicalRaw] = [
+            $pageIndexes[0],
+            $pageIndexes[count($pageIndexes) - 1],
+        ];
+    }
+
+    $repeatedTopContentCuts = array_fill(0, $pageCount, 0.0);
+    $repeatedTopContentPages = [];
+    for ($pi = 0; $pi < $pageCount; $pi++) {
+        if (!empty($topAnchorLinesByPage[$pi])) {
+            continue;
+        }
+        $ph = (float)($pageHeights[$pi] ?? 0.0);
+        if ($ph <= 0.0) {
+            continue;
+        }
+
+        $candidateExtents = [];
+        foreach ($headerLinesByPage[$pi] ?? [] as $ln) {
+            $norm = (string)($ln['norm'] ?? '');
+            if ($norm === '' || !empty($headerRepeated[$norm])) {
+                continue;
+            }
+            if (($headerNormCounts[$norm] ?? 0) < 3) {
+                continue;
+            }
+            if (preg_match('/^(?:angebot - nr\.|ausdruckdatum:|bearbeitet von|pamproject|preis nach|rabatt|menge|nettowert|mwst|bruttowert|nettopreise eur|ansicht von innen|0%)/ui', $norm) === 1) {
+                continue;
+            }
+            if (!empty($featureHeaderCandidates[$norm])) {
+                continue;
+            }
+
+            $candidateExtents[] = ($ph - (float)$ln['y']) + (float)$ln['fs'];
+        }
+
+        if (count($candidateExtents) >= 4) {
+            $repeatedTopContentCuts[$pi] = min($ph * 0.35, max($candidateExtents));
+            $repeatedTopContentPages[] = $pi;
+        }
+    }
+    sort($repeatedTopContentPages, SORT_NUMERIC);
+    if (count($repeatedTopContentPages) >= 1) {
+        $firstRepeatedTopContentPage = $repeatedTopContentPages[0];
+        $lastRepeatedTopContentPage = $repeatedTopContentPages[count($repeatedTopContentPages) - 1];
+        foreach ($repeatedTopContentPages as $pi) {
+            if ($pi === $firstRepeatedTopContentPage || $pi === $lastRepeatedTopContentPage) {
+                $repeatedTopContentCuts[$pi] = 0.0;
+            }
+        }
+    }
+
     $headerRepeatedImages = [];
     foreach ($headerImageCounts as $sig => $cnt) { if ($cnt >= $repeatThreshold) $headerRepeatedImages[$sig] = true; }
     $footerRepeatedImages = [];
@@ -2834,13 +3248,16 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
                 $hr = max($hr, ($ph - (float)$ln['y']) + (float)$ln['fs']);
             }
         }
+        if (($repeatedTopContentCuts[$pi] ?? 0.0) > 0.0) {
+            $hr = max($hr, (float)$repeatedTopContentCuts[$pi]);
+        }
         foreach ($headerImagesByPage[$pi] ?? [] as $imgInfo) {
             if (!empty($headerRepeatedImages[$imgInfo['sig']])) {
                 $hr = max($hr, $ph - (float)$imgInfo['minY']);
             }
         }
         foreach ($topAnchorLinesByPage[$pi] ?? [] as $anchor) {
-            $anchorLimit = max(0.0, ($ph - (float)$anchor['y']) - (float)$anchor['fs'] - 2.0);
+            $anchorLimit = max(0.0, (float)($anchor['top'] ?? 0.0) - 2.0);
             if ($hr > 0.0) {
                 $hr = min($hr, $anchorLimit);
             }
@@ -3034,9 +3451,19 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
     for ($pi = 0; $pi < $pageCount; $pi++) {
         $ph = (float)($pageHeights[$pi] ?? 0.0);
         if ($ph <= 0.0) continue;
+        $hasTopAnchor = !empty($topAnchorLinesByPage[$pi]);
         foreach ($normalizedHeaderImagesByPage[$pi] ?? [] as $imgInfo) {
             if (!empty($headerRepeatedImages[$imgInfo['sig']])) {
                 $pageHeaderCut2[$pi] = max($pageHeaderCut2[$pi], min($ph * 0.25, (float)$imgInfo['extent']));
+            }
+        }
+        if ($hasTopAnchor) {
+            $pageHeaderCut2[$pi] = 0.0;
+        }
+        foreach ($topAnchorLinesByPage[$pi] ?? [] as $anchor) {
+            $anchorLimit = max(0.0, (float)($anchor['top'] ?? 0.0) - 2.0);
+            if ($pageHeaderCut2[$pi] > 0.0) {
+                $pageHeaderCut2[$pi] = min($pageHeaderCut2[$pi], $anchorLimit);
             }
         }
         foreach ($normalizedFooterImagesByPage[$pi] ?? [] as $imgInfo) {
@@ -3517,9 +3944,19 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
     $postFooterCuts = array_fill(0, $pageCount, 0.0);
     for ($pi = 0; $pi < $pageCount; $pi++) {
         $contentHeight = (float)($pageMeta[$pi]['content_height'] ?? 0.0);
+        $hasTopAnchor = !empty($topAnchorLinesByPage[$pi]);
         foreach ($postHeaderImagesByPage[$pi] ?? [] as $imgInfo) {
             if (!empty($postHeaderRepeatedImages[$imgInfo['sig']])) {
                 $postHeaderCuts[$pi] = max($postHeaderCuts[$pi], min($contentHeight * 0.25, (float)$imgInfo['extent']));
+            }
+        }
+        if ($hasTopAnchor) {
+            $postHeaderCuts[$pi] = 0.0;
+        }
+        foreach ($topAnchorLinesByPage[$pi] ?? [] as $anchor) {
+            $anchorLimit = max(0.0, (float)($anchor['top'] ?? 0.0) - 2.0);
+            if ($postHeaderCuts[$pi] > 0.0) {
+                $postHeaderCuts[$pi] = min($postHeaderCuts[$pi], $anchorLimit);
             }
         }
         foreach ($postFooterImagesByPage[$pi] ?? [] as $imgInfo) {
@@ -3639,6 +4076,9 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
         if ($pi === 0) {
             $topTrim = 0.0;
         }
+        if (!empty($topAnchorLinesByPage[$pi])) {
+            $topTrim = 0.0;
+        }
         if ($pi === $pageCount - 1) {
             $bottomTrim = 0.0;
         }
@@ -3723,44 +4163,173 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
     }
     unset($jsonItem);
 
+    $jsonItems = array_values(array_filter($jsonItems, static function (array $item) use ($repeatedFeatureHeaderKeepPages, $canonicalHeaderText): bool {
+        if (($item['type'] ?? '') !== 'text') {
+            return true;
+        }
+        $canonical = $canonicalHeaderText((string)($item['text'] ?? ''));
+        if ($canonical === '' || !isset($repeatedFeatureHeaderKeepPages[$canonical])) {
+            return true;
+        }
+        $pageIndex = (int)($item['page_index'] ?? -1);
+        return in_array($pageIndex, $repeatedFeatureHeaderKeepPages[$canonical], true);
+    }));
+    foreach ($jsonItems as $idx => &$jsonItem) {
+        $jsonItem['stream_index'] = $idx;
+    }
+    unset($jsonItem);
+
+    $jsonItems = removeRedundantFullPageImages($jsonItems, $pageWidths, $pageMeta);
+    usort($jsonItems, static function (array $a, array $b): int {
+        $pa = (int)($a['page_index'] ?? 0);
+        $pb = (int)($b['page_index'] ?? 0);
+        if ($pa !== $pb) return $pa <=> $pb;
+        $ta = (float)($a['top'] ?? 0.0);
+        $tb = (float)($b['top'] ?? 0.0);
+        if (abs($ta - $tb) > 0.5) return $ta <=> $tb;
+        $la = (float)($a['left'] ?? $a['x'] ?? 0.0);
+        $lb = (float)($b['left'] ?? $b['x'] ?? 0.0);
+        if (abs($la - $lb) > 0.01) return $la <=> $lb;
+        return strcmp((string)($a['type'] ?? ''), (string)($b['type'] ?? ''));
+    });
+    foreach ($jsonItems as $idx => &$jsonItem) {
+        $jsonItem['stream_index'] = $idx;
+    }
+    unset($jsonItem);
+
+    $jsonItems = compactVerticalWhitespace($jsonItems);
+    usort($jsonItems, static function (array $a, array $b): int {
+        $ta = (float)($a['top'] ?? 0.0);
+        $tb = (float)($b['top'] ?? 0.0);
+        if (abs($ta - $tb) > 0.5) return $ta <=> $tb;
+        $la = (float)($a['left'] ?? $a['x'] ?? 0.0);
+        $lb = (float)($b['left'] ?? $b['x'] ?? 0.0);
+        if (abs($la - $lb) > 0.01) return $la <=> $lb;
+        return strcmp((string)($a['type'] ?? ''), (string)($b['type'] ?? ''));
+    });
+    foreach ($jsonItems as $idx => &$jsonItem) {
+        $jsonItem['stream_index'] = $idx;
+    }
+    unset($jsonItem);
+
     $renderedBottom = 0.0;
-    $htmlOut = [
-        '<!doctype html><html><head><meta charset="utf-8"><style>',
-        'body{margin:0;background:#f3f3f3;font-family:Arial,sans-serif;}',
-        '#canvas{position:relative;margin:0 auto;background:#fff;}',
-        '.item{position:absolute;box-sizing:border-box;}',
-        '.txt{white-space:pre;line-height:1;z-index:3;}',
-        '.img{display:block;z-index:1;}',
-        '.line{display:block;z-index:2;}',
-        '</style></head><body><div id="canvas">'
-    ];
     foreach ($jsonItems as $item) {
-        $left = (float)($item['left'] ?? $item['x'] ?? 0.0);
         $top = (float)($item['top'] ?? 0.0);
         if (($item['type'] ?? '') === 'text') {
             $fs = (float)($item['font_size'] ?? 12.0);
-            $weight = !empty($item['bold']) ? '700' : '400';
-            $htmlOut[] = '<div class="item txt" style="left:' . $left . 'px;top:' . $top . 'px;font-size:' . $fs . 'px;font-weight:' . $weight . ';">' . htmlspecialchars((string)($item['text'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</div>';
             $renderedBottom = max($renderedBottom, $top + $fs);
         } elseif (($item['type'] ?? '') === 'image') {
-            $w = max(0.0, (float)($item['width'] ?? 0.0));
             $h = max(0.0, (float)($item['height'] ?? 0.0));
-            $style = 'left:' . $left . 'px;top:' . $top . 'px;';
-            if ($w > 0.0) $style .= 'width:' . $w . 'px;';
-            if ($h > 0.0) $style .= 'height:' . $h . 'px;';
-            $htmlOut[] = '<img class="item img" style="' . $style . '" src="' . htmlspecialchars((string)($item['url'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '" alt="image" />';
             $renderedBottom = max($renderedBottom, $top + $h);
         } elseif (($item['type'] ?? '') === 'line') {
-            $w = max(0.0, (float)($item['width'] ?? 0.0));
             $h = max(0.0, (float)($item['height'] ?? 0.0));
-            $color = htmlspecialchars((string)($item['color'] ?? '#000'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-            $htmlOut[] = '<div class="item line" style="left:' . $left . 'px;top:' . $top . 'px;width:' . $w . 'px;height:' . $h . 'px;background:' . $color . ';"></div>';
             $renderedBottom = max($renderedBottom, $top + $h);
         }
     }
     $xtractMeta['stream_height'] = $renderedBottom;
-    $htmlOut[] = '</div><style>#canvas{width:' . (int)ceil($maxWidth) . 'px;height:' . (int)ceil($renderedBottom) . 'px;}</style></body></html>';
-    file_put_contents('out2.html', implode('', $htmlOut));
+
+    $consolidatedItems = [];
+    foreach ($jsonItems as $idx => $item) {
+        $boxHeight = 0.0;
+        if (($item['type'] ?? '') === 'text') {
+            $boxHeight = max(0.0, (float)($item['font_size'] ?? 0.0));
+        } else {
+            $boxHeight = max(0.0, (float)($item['height'] ?? 0.0));
+        }
+
+        $item['page_index'] = 0;
+        $item['page_height'] = $renderedBottom;
+        $item['page_offset_top'] = 0.0;
+        $item['page_local_top'] = (float)($item['top'] ?? 0.0);
+        $item['y'] = max(0.0, $renderedBottom - (float)($item['top'] ?? 0.0) - $boxHeight);
+        $item['stream_index'] = $idx;
+        $consolidatedItems[] = $item;
+    }
+    $forcedRepeatedHeaderTexts = [
+        'rc2',
+        'scheibe umlaufend eingeklebt',
+        'schwarze dichtung',
+        'warme kante schwarz',
+        'transportleiste',
+        'transportgurte',
+        'dübelbohrung links+rechts',
+    ];
+    $consolidatedRepeatedHeaderIndexes = [];
+    foreach ($consolidatedItems as $idx => $item) {
+        if (($item['type'] ?? '') !== 'text') {
+            continue;
+        }
+        $canonical = $canonicalHeaderText((string)($item['text'] ?? ''));
+        if ($canonical === '' || (!isset($repeatedFeatureHeaderKeepPages[$canonical]) && !in_array($canonical, $forcedRepeatedHeaderTexts, true))) {
+            continue;
+        }
+        $consolidatedRepeatedHeaderIndexes[$canonical][] = $idx;
+    }
+    $jsonItems = [];
+    foreach ($consolidatedItems as $idx => $item) {
+        if (($item['type'] ?? '') === 'text') {
+            $canonical = $canonicalHeaderText((string)($item['text'] ?? ''));
+            if ($canonical !== '' && isset($consolidatedRepeatedHeaderIndexes[$canonical])) {
+                $occurrences = $consolidatedRepeatedHeaderIndexes[$canonical];
+                if (count($occurrences) > 2 && $idx !== $occurrences[0] && $idx !== $occurrences[count($occurrences) - 1]) {
+                    continue;
+                }
+            }
+        }
+        $jsonItems[] = $item;
+    }
+    $jsonItems = compactVerticalWhitespace($jsonItems);
+    usort($jsonItems, static function (array $a, array $b): int {
+        $ta = (float)($a['top'] ?? 0.0);
+        $tb = (float)($b['top'] ?? 0.0);
+        if (abs($ta - $tb) > 0.5) return $ta <=> $tb;
+        $la = (float)($a['left'] ?? $a['x'] ?? 0.0);
+        $lb = (float)($b['left'] ?? $b['x'] ?? 0.0);
+        if (abs($la - $lb) > 0.01) return $la <=> $lb;
+        return strcmp((string)($a['type'] ?? ''), (string)($b['type'] ?? ''));
+    });
+    $renderedBottom = 0.0;
+    foreach ($jsonItems as $item) {
+        $top = (float)($item['top'] ?? 0.0);
+        $boxHeight = ($item['type'] ?? '') === 'text'
+            ? max(0.0, (float)($item['font_size'] ?? 0.0))
+            : max(0.0, (float)($item['height'] ?? 0.0));
+        $renderedBottom = max($renderedBottom, $top + $boxHeight);
+    }
+    $xtractMeta['stream_height'] = $renderedBottom;
+
+    foreach ($jsonItems as $idx => &$jsonItem) {
+        $boxHeight = ($jsonItem['type'] ?? '') === 'text'
+            ? max(0.0, (float)($jsonItem['font_size'] ?? 0.0))
+            : max(0.0, (float)($jsonItem['height'] ?? 0.0));
+        $jsonItem['stream_index'] = $idx;
+        $jsonItem['page_index'] = 0;
+        $jsonItem['page_height'] = $renderedBottom;
+        $jsonItem['page_offset_top'] = 0.0;
+        $jsonItem['page_local_top'] = (float)($jsonItem['top'] ?? 0.0);
+        $jsonItem['y'] = max(0.0, $renderedBottom - (float)($jsonItem['top'] ?? 0.0) - $boxHeight);
+    }
+    unset($jsonItem);
+
+    $pageMeta = [[
+        'page' => 1,
+        'page_index' => 0,
+        'raw_height' => $renderedBottom,
+        'header_cut' => 0.0,
+        'footer_cut' => 0.0,
+        'image_header_cut' => 0.0,
+        'image_footer_cut' => 0.0,
+        'content_height' => $renderedBottom,
+        'offset_top' => 0.0,
+        'keep_header' => true,
+        'keep_footer' => true,
+        'content_trim_top' => 0.0,
+        'content_trim_bottom' => 0.0,
+    ]];
+    $xtractMeta['page_count'] = 1;
+
+    $html = renderElementsHtml($jsonItems);
+    file_put_contents('out2.html', $html);
 
     file_put_contents('out2.json', json_encode([
         'meta' => $xtractMeta,
@@ -3772,7 +4341,7 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
         'meta' => $xtractMeta,
         'pages' => $pageMeta,
         'items' => $jsonItems,
-        'html' => implode('', $htmlOut),
+        'html' => $html,
     ];
     } catch (\Throwable $e) {
         throw new RuntimeException('xtract failed: ' . $e->getMessage(), 0, $e);
@@ -3781,6 +4350,24 @@ function xtractRun(string $pdfFile, string $mode = 'normalized', bool $ocrFallba
 
 final class XtractEngine implements ExtractorEngine
 {
+    /**
+     * @param array<int,array<string,mixed>> $items
+     * @param array{x: float|int, y: float|int, w: float|int, h: float|int}|null $aabb
+     */
+    public static function renderElementsHtml(array $items, ?array $aabb = null): string
+    {
+        return renderElementsHtml($items, $aabb);
+    }
+
+    /**
+     * @param array<int,array<string,mixed>> $items
+     * @param array{x: float|int, y: float|int, w: float|int, h: float|int}|null $aabb
+     */
+    public static function renderElementsHtmlFragment(array $items, ?array $aabb = null): string
+    {
+        return renderElementsHtmlFragment($items, $aabb);
+    }
+
     /**
      * @param array<string,mixed> $options
      */
