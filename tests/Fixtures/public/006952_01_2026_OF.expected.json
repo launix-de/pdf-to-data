@@ -1,7 +1,7 @@
 {
     "normalized": {
         "pages_count": 1,
-        "elements_count": 2937,
+        "elements_count": 3610,
         "meta": {
             "page_count": 1,
             "repeat_threshold": 42,
@@ -14,9 +14,9 @@
             ]
         },
         "type_counts": {
-            "image": 263,
+            "image": 304,
             "line": 1055,
-            "text": 1619
+            "text": 2251
         },
         "text_contains": [
             "Angebot - Nr. 006952/01/2026/OF",
@@ -45,7 +45,7 @@
             "Fenstern und Türen PVC",
             "Gesamtgewicht: 1514,6 kg"
         ],
-        "image_count": 318,
+        "image_count": 304,
         "quotation": {
             "schema": [
                 "position",
