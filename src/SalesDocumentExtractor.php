@@ -30,7 +30,10 @@ final class SalesDocumentExtractor
             }
         }
 
-        $quotationTable = $this->extractQuotationTable($textElements, $document->pages(), $projectedElements);
+        $rows = $this->clusterTextRows($textElements, $document->pages());
+        $quotationTable = $this->extractQuotationTable($rows, $projectedElements);
+        $invoiceTable = $this->extractInvoiceTable($rows, $projectedElements);
+        $deliveryNoteTable = $this->extractDeliveryNoteTable($rows, $projectedElements);
 
         return [
             'meta' => $document->meta(),
@@ -51,21 +54,26 @@ final class SalesDocumentExtractor
                 $imageElements
             ),
             'quotation' => $quotationTable,
+            'invoice' => $invoiceTable,
+            'delivery_note' => $deliveryNoteTable,
         ];
     }
 
     /**
-     * @param array<int,array<string,mixed>> $textElements
-     * @param array<int,array<string,mixed>> $pages
+     * @param array<int,array{top: float, cells: array<int,array<string,mixed>>}> $rows
      * @param array<int,array<string,mixed>> $projectedElements
      * @return array<string,mixed>|null
      */
-    private function extractQuotationTable(array $textElements, array $pages, array $projectedElements): ?array
+    private function extractQuotationTable(array $rows, array $projectedElements): ?array
     {
-        $rows = $this->clusterTextRows($textElements, $pages);
         $positionedQuotation = $this->extractPositionBlocksQuotation($rows, $projectedElements);
         if ($positionedQuotation !== null) {
             return $positionedQuotation;
+        }
+
+        $verscoQuotation = $this->extractVerscoQuotation($rows, $projectedElements);
+        if ($verscoQuotation !== null) {
+            return $verscoQuotation;
         }
 
         $headerIndex = null;
@@ -205,6 +213,252 @@ final class SalesDocumentExtractor
             'line_items' => $lineItems,
             'subtotal' => $subtotal,
             'totals' => $totals,
+        ];
+    }
+
+    /**
+     * @param array<int,array{top: float, cells: array<int,array<string,mixed>>}> $rows
+     * @param array<int,array<string,mixed>> $projectedElements
+     * @return array<string,mixed>|null
+     */
+    private function extractVerscoQuotation(array $rows, array $projectedElements): ?array
+    {
+        $headerIndex = null;
+        foreach ($rows as $index => $row) {
+            $joined = $this->normalizeCell(implode(' ', array_map(
+                static fn(array $cell): string => trim((string)($cell['text'] ?? '')),
+                $row['cells']
+            )));
+            if (preg_match('/\bposition\b/u', $joined) === 1
+                && preg_match('/\bbezeichnung\b/u', $joined) === 1
+                && preg_match('/\banzahl\b/u', $joined) === 1
+                && preg_match('/\bpreis\b/u', $joined) === 1
+                && preg_match('/\bgesamt\b/u', $joined) === 1) {
+                $headerIndex = $index;
+                break;
+            }
+        }
+
+        if ($headerIndex === null) {
+            return null;
+        }
+
+        $blockStarts = [];
+        $groupByStart = [];
+        $currentGroup = null;
+
+        for ($index = 0, $count = count($rows); $index < $count; $index++) {
+            $texts = $this->rowTexts($rows[$index]);
+            if ($texts === []) {
+                continue;
+            }
+
+            $joined = trim(implode(' ', $texts));
+            if ($index < $headerIndex) {
+                $normalized = $this->normalizeCell($joined);
+                if (preg_match('/^(?:gruppe\s+\d+|neue gruppe)$/u', $normalized) === 1) {
+                    $currentGroup = $joined;
+                }
+                continue;
+            }
+
+            if ($this->isVerscoItemRow($texts)) {
+                $blockStarts[] = $index;
+                $groupByStart[$index] = $currentGroup;
+                continue;
+            }
+
+            $normalized = $this->normalizeCell($joined);
+            if (preg_match('/^(?:gruppe\s+\d+|neue gruppe)$/u', $normalized) === 1) {
+                $currentGroup = $joined;
+            }
+        }
+
+        if ($blockStarts === []) {
+            return null;
+        }
+
+        $lineItems = [];
+        foreach ($blockStarts as $offset => $startIndex) {
+            $endIndex = $blockStarts[$offset + 1] ?? count($rows);
+            $blockRows = array_slice($rows, $startIndex, $endIndex - $startIndex);
+            $blockEndTop = $endIndex < count($rows)
+                ? (float)$rows[$endIndex]['top']
+                : ((float)$blockRows[count($blockRows) - 1]['top'] + $this->estimateRowHeight($blockRows[count($blockRows) - 1]) + 4.0);
+            $lineItem = $this->buildVerscoQuotationLineItem($blockRows, $projectedElements, $blockEndTop, $groupByStart[$startIndex] ?? null);
+            if ($lineItem !== null) {
+                $lineItems[] = $lineItem;
+            }
+        }
+
+        if ($lineItems === []) {
+            return null;
+        }
+
+        $subtotal = array_reduce(
+            $lineItems,
+            static fn(float $sum, array $item): float => $sum + (float)($item['gesamt'] ?? 0.0),
+            0.0
+        );
+
+        return [
+            'schema' => ['position', 'beschreibung', 'einzelpreis', 'menge', 'einheit', 'gesamt'],
+            'line_items' => $lineItems,
+            'subtotal' => $subtotal,
+            'totals' => ['net' => $subtotal],
+        ];
+    }
+
+    /**
+     * @param array<int,array{top: float, cells: array<int,array<string,mixed>>}> $rows
+     * @param array<int,array<string,mixed>> $projectedElements
+     * @return array<string,mixed>|null
+     */
+    private function extractInvoiceTable(array $rows, array $projectedElements): ?array
+    {
+        $headerIndex = null;
+        foreach ($rows as $index => $row) {
+            $joined = $this->normalizeCell(implode(' ', $this->rowTexts($row)));
+            if (preg_match('/\bpos\b/u', $joined) === 1
+                && preg_match('/\bartikel\b/u', $joined) === 1
+                && preg_match('/\beinzelpreis\b/u', $joined) === 1
+                && preg_match('/\bgesamtpreis\b/u', $joined) === 1) {
+                $headerIndex = $index;
+                break;
+            }
+        }
+
+        if ($headerIndex === null) {
+            return null;
+        }
+
+        $lineItems = [];
+        $currentItem = null;
+
+        for ($index = $headerIndex + 1, $count = count($rows); $index < $count; $index++) {
+            $texts = $this->rowTexts($rows[$index]);
+            if ($texts === []) {
+                continue;
+            }
+
+            $joined = trim(implode(' ', $texts));
+            $normalized = $this->normalizeCell($joined);
+            if ($normalized === 'eur' || str_contains($normalized, 'unit price') || str_contains($normalized, 'total price')) {
+                continue;
+            }
+
+            if ($this->isInvoiceSummaryRow($normalized)) {
+                break;
+            }
+
+            $parsed = $this->parseInvoiceItemRow($texts);
+            if ($parsed !== null) {
+                if ($currentItem !== null) {
+                    $lineItems[] = $currentItem;
+                }
+                $currentItem = $parsed;
+                continue;
+            }
+
+            if ($currentItem !== null && !$this->isDocumentFurnitureRow($normalized)) {
+                $append = preg_replace('/\s+/u', ' ', $joined) ?? $joined;
+                if ($append !== '') {
+                    $currentItem['beschreibung'] .= "\n" . trim($append);
+                }
+            }
+        }
+
+        if ($currentItem !== null) {
+            $lineItems[] = $currentItem;
+        }
+
+        if ($lineItems === []) {
+            return null;
+        }
+
+        $subtotal = array_reduce(
+            $lineItems,
+            static fn(float $sum, array $item): float => $sum + (float)($item['gesamt'] ?? 0.0),
+            0.0
+        );
+
+        return [
+            'schema' => ['position', 'beschreibung', 'menge', 'einheit', 'einzelpreis', 'gesamt'],
+            'line_items' => $lineItems,
+            'subtotal' => $subtotal,
+            'totals' => ['net' => $subtotal],
+        ];
+    }
+
+    /**
+     * @param array<int,array{top: float, cells: array<int,array<string,mixed>>}> $rows
+     * @param array<int,array<string,mixed>> $projectedElements
+     * @return array<string,mixed>|null
+     */
+    private function extractDeliveryNoteTable(array $rows, array $projectedElements): ?array
+    {
+        $headerIndex = null;
+        foreach ($rows as $index => $row) {
+            $joined = $this->normalizeCell(implode(' ', $this->rowTexts($row)));
+            if (preg_match('/\bpos\b/u', $joined) === 1
+                && preg_match('/\bbeschreibung\b/u', $joined) === 1
+                && (preg_match('/\bartikelnummer\b/u', $joined) === 1 || preg_match('/\barticle\b/u', $joined) === 1)) {
+                $headerIndex = $index;
+                break;
+            }
+        }
+
+        if ($headerIndex === null) {
+            return null;
+        }
+
+        $lineItems = [];
+        $currentItem = null;
+
+        for ($index = $headerIndex + 1, $count = count($rows); $index < $count; $index++) {
+            $texts = $this->rowTexts($rows[$index]);
+            if ($texts === []) {
+                continue;
+            }
+
+            $joined = trim(implode(' ', $texts));
+            $normalized = $this->normalizeCell($joined);
+
+            if ($this->isDocumentFurnitureRow($normalized)) {
+                continue;
+            }
+            if (str_starts_with($normalized, 'lieferung frei haus')) {
+                break;
+            }
+
+            $parsed = $this->parseDeliveryItemRow($texts);
+            if ($parsed !== null) {
+                if ($currentItem !== null) {
+                    $lineItems[] = $currentItem;
+                }
+                $currentItem = $parsed;
+                continue;
+            }
+
+            if ($currentItem !== null) {
+                $append = preg_replace('/\s+/u', ' ', $joined) ?? $joined;
+                if ($append !== '') {
+                    $currentItem['beschreibung'] .= "\n" . trim($append);
+                }
+            }
+        }
+
+        if ($currentItem !== null) {
+            $lineItems[] = $currentItem;
+        }
+
+        if ($lineItems === []) {
+            return null;
+        }
+
+        return [
+            'schema' => ['position', 'beschreibung', 'menge', 'einheit'],
+            'line_items' => $lineItems,
         ];
     }
 
@@ -544,15 +798,19 @@ final class SalesDocumentExtractor
             return null;
         }
 
+        $description = $this->normalizeDescriptionLines($descriptionLines);
+        $description = $this->restoreMissingDescriptionHeading($description);
+
         $detailHtml = $this->buildPositionDetailHtml(
             $projectedElements,
             $detailStartTop ?? ((float)$blockRows[0]['top'] + $this->estimateRowHeight($blockRows[0])),
             $blockEndTop
         );
+        $detailHtml = $this->ensureDetailHtmlContainsDescriptionHeading($detailHtml, $description);
 
         return [
             'position' => $position,
-            'beschreibung' => $this->normalizeDescriptionLines($descriptionLines),
+            'beschreibung' => $description,
             'einzelpreis' => $unitPrice,
             'menge' => $quantity,
             'einheit' => $unit ?? null,
@@ -561,6 +819,97 @@ final class SalesDocumentExtractor
             'brutto' => $grossValue,
             'detail_html' => $detailHtml,
         ];
+    }
+
+    /**
+     * @param array<int,array{top: float, cells: array<int,array<string,mixed>>}> $blockRows
+     * @param array<int,array<string,mixed>> $projectedElements
+     * @return array<string,mixed>|null
+     */
+    private function buildVerscoQuotationLineItem(array $blockRows, array $projectedElements, float $blockEndTop, ?string $group): ?array
+    {
+        if ($blockRows === []) {
+            return null;
+        }
+
+        $itemTexts = $this->rowTexts($blockRows[0]);
+        if (!$this->isVerscoItemRow($itemTexts)) {
+            return null;
+        }
+
+        $position = (int)$itemTexts[0];
+        $numericIndexes = [];
+        foreach ($itemTexts as $index => $text) {
+            if ($index === 0) {
+                continue;
+            }
+            if ($this->parseDecimal($text) !== null) {
+                $numericIndexes[] = $index;
+            }
+        }
+
+        if (count($numericIndexes) < 2) {
+            return null;
+        }
+
+        $unitPriceIndex = $numericIndexes[count($numericIndexes) - 2];
+        $totalIndex = $numericIndexes[count($numericIndexes) - 1];
+        $unitPrice = $this->parseDecimal($itemTexts[$unitPriceIndex]);
+        $total = $this->parseDecimal($itemTexts[$totalIndex]);
+        if ($unitPrice === null || $total === null) {
+            return null;
+        }
+
+        $quantityParts = array_slice($itemTexts, 2, max(0, $unitPriceIndex - 2));
+        $quantityRaw = trim(implode(' ', $quantityParts));
+        $quantityTail = null;
+        if (substr_count($quantityRaw, '(') > substr_count($quantityRaw, ')') && isset($blockRows[1])) {
+            $nextTexts = $this->rowTexts($blockRows[1]);
+            $candidateTail = $nextTexts !== [] ? trim((string)end($nextTexts)) : null;
+            if (is_string($candidateTail) && preg_match('/^[[:alpha:]]+\)$/u', $candidateTail) === 1) {
+                $quantityRaw .= ' ' . $candidateTail;
+                $quantityTail = $candidateTail;
+            }
+        }
+        [$quantity, $unit] = $this->splitQuantityAndUnit($quantityRaw);
+        if ($quantity === null && isset($itemTexts[2])) {
+            [$quantity, $unit] = $this->splitQuantityAndUnit($itemTexts[2]);
+        }
+
+        $rowLabel = $itemTexts[1] ?? '';
+        $detailStartTop = (float)$blockRows[0]['top'] + $this->estimateRowHeight($blockRows[0]) + 2.0;
+        $descriptionLines = [];
+
+        foreach (array_slice($blockRows, 1) as $row) {
+            $joined = trim(implode(' ', $this->rowTexts($row)));
+            if ($quantityTail !== null && str_ends_with($joined, ' ' . $quantityTail)) {
+                $joined = trim(substr($joined, 0, -strlen(' ' . $quantityTail)));
+            }
+            if ($joined === '' || $this->isOfferBoilerplateRow($joined)) {
+                continue;
+            }
+            $descriptionLines[] = $joined;
+        }
+
+        $description = $this->normalizeVerscoDescriptionLines($descriptionLines, $rowLabel);
+        $detailHtml = $this->buildPositionDetailHtml($projectedElements, $detailStartTop, $blockEndTop);
+        $detailHtml = $this->ensureDetailHtmlContainsDescriptionHeading($detailHtml, $description);
+
+        $result = [
+            'position' => $position,
+            'beschreibung' => $description,
+            'einzelpreis' => $unitPrice,
+            'menge' => $quantity,
+            'einheit' => $unit,
+            'gesamt' => $total,
+            'detail_html' => $detailHtml,
+        ];
+
+        if ($group !== null && $group !== '') {
+            $result['group'] = $group;
+        }
+
+        return $result;
     }
 
     /**
@@ -825,6 +1174,240 @@ final class SalesDocumentExtractor
         }
 
         return implode("\n", $normalized);
+    }
+
+    /**
+     * @param array<int,string> $lines
+     */
+    private function normalizeVerscoDescriptionLines(array $lines, string $fallbackLabel): string
+    {
+        $normalized = [];
+        foreach ($lines as $line) {
+            $clean = preg_replace('/\s+/u', ' ', trim($line)) ?? trim($line);
+            if ($clean === '' || in_array($clean, ['Bezeichnung', 'Anzahl', 'Preis', 'Gesamt'], true)) {
+                continue;
+            }
+            if ($normalized !== [] && end($normalized) === $clean) {
+                continue;
+            }
+            $normalized[] = $clean;
+        }
+
+        $first = $normalized[0] ?? '';
+        if ($first === '' && $fallbackLabel !== '') {
+            return $fallbackLabel;
+        }
+
+        if ($this->isVerscoPlaceholderLabel($fallbackLabel) || $fallbackLabel === '') {
+            return implode("\n", $normalized);
+        }
+
+        if ($first !== $fallbackLabel) {
+            array_unshift($normalized, $fallbackLabel);
+        }
+
+        return implode("\n", $normalized);
+    }
+
+    private function restoreMissingDescriptionHeading(string $description): string
+    {
+        if ($description === '') {
+            return $description;
+        }
+
+        $firstLine = trim((string)strtok($description, "\n"));
+        if ($firstLine === '') {
+            return $description;
+        }
+
+        if (
+            !preg_match('/^(?:PVC-SCHREINERARBEITEN|Elemente\/Profile \[[^\]]+\]|Rahmenverbreiterung)$/u', $firstLine)
+            && preg_match('/(?:^|\n)(?:Produktnummer\/Produ|Fensterbreite:|Fensterhöhe:|Fenster- \/ Türentyp:|Glaspaket:|Beschlägeart:|Dichtungsfarbe:)/u', $description) === 1
+        ) {
+            return "PVC-SCHREINERARBEITEN\n" . $description;
+        }
+
+        return $description;
+    }
+
+    private function ensureDetailHtmlContainsDescriptionHeading(string $detailHtml, string $description): string
+    {
+        $heading = trim((string)strtok($description, "\n"));
+        if ($detailHtml === '' || $heading === '' || str_contains($detailHtml, $heading)) {
+            return $detailHtml;
+        }
+
+        return '<div class="detail-heading">' . htmlspecialchars($heading, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</div>' . $detailHtml;
+    }
+
+    /**
+     * @param array{top: float, cells: array<int,array<string,mixed>>} $row
+     * @return array<int,string>
+     */
+    private function rowTexts(array $row): array
+    {
+        return array_values(array_filter(array_map(
+            static fn(array $cell): string => trim((string)($cell['text'] ?? '')),
+            $row['cells']
+        ), static fn(string $text): bool => $text !== ''));
+    }
+
+    /**
+     * @param array<int,string> $texts
+     */
+    private function isVerscoItemRow(array $texts): bool
+    {
+        if (count($texts) < 4 || preg_match('/^\d{4}$/', $texts[0]) !== 1) {
+            return false;
+        }
+
+        $last = $this->parseDecimal($texts[count($texts) - 1]);
+        $prev = $this->parseDecimal($texts[count($texts) - 2] ?? null);
+        return $last !== null && $prev !== null;
+    }
+
+    private function isVerscoPlaceholderLabel(string $label): bool
+    {
+        $normalized = $this->normalizeCell($label);
+        return $normalized === 'schnellplanung' || preg_match('/^kunden pos\./u', $normalized) === 1;
+    }
+
+    /**
+     * @param array<int,string> $texts
+     * @return array<string,mixed>|null
+     */
+    private function parseInvoiceItemRow(array $texts): ?array
+    {
+        if ($texts === [] || preg_match('/^\d+$/', $texts[0]) !== 1) {
+            return null;
+        }
+
+        $numericIndexes = [];
+        foreach ($texts as $index => $text) {
+            if ($index === 0) {
+                continue;
+            }
+            if ($this->parseDecimal($text) !== null) {
+                $numericIndexes[] = $index;
+            }
+        }
+
+        if (count($numericIndexes) < 3) {
+            return null;
+        }
+
+        $quantityIndex = $numericIndexes[0];
+        $unitPriceIndex = $numericIndexes[count($numericIndexes) - 2];
+        $totalIndex = $numericIndexes[count($numericIndexes) - 1];
+
+        $position = (int)$texts[0];
+        $quantity = $this->parseDecimal($texts[$quantityIndex]);
+        $unit = $texts[$quantityIndex + 1] ?? null;
+        $articleNoIndex = $quantityIndex + 2;
+        $descriptionStart = $articleNoIndex + 1;
+        $descriptionParts = array_slice($texts, $descriptionStart, max(0, $unitPriceIndex - $descriptionStart));
+        $description = trim(implode(' ', $descriptionParts));
+        if ($description === '') {
+            return null;
+        }
+
+        return [
+            'position' => $position,
+            'beschreibung' => $description,
+            'menge' => $quantity,
+            'einheit' => $unit,
+            'einzelpreis' => $this->parseDecimal($texts[$unitPriceIndex]),
+            'gesamt' => $this->parseDecimal($texts[$totalIndex]),
+            'artikelnummer' => $texts[$articleNoIndex] ?? null,
+        ];
+    }
+
+    /**
+     * @param array<int,string> $texts
+     * @return array<string,mixed>|null
+     */
+    private function parseDeliveryItemRow(array $texts): ?array
+    {
+        if ($texts === [] || preg_match('/^\d+$/', $texts[0]) !== 1) {
+            return null;
+        }
+
+        if (count($texts) < 5) {
+            return null;
+        }
+
+        $position = (int)$texts[0];
+        $quantity = $this->parseDecimal($texts[1]);
+        if ($quantity === null) {
+            return null;
+        }
+
+        $unit = $texts[2] ?? null;
+        $descriptionParts = array_slice($texts, 4);
+        $description = trim(implode(' ', $descriptionParts));
+        if ($description === '') {
+            return null;
+        }
+
+        return [
+            'position' => $position,
+            'beschreibung' => $description,
+            'menge' => $quantity,
+            'einheit' => $unit,
+            'artikelnummer' => $texts[3] ?? null,
+        ];
+    }
+
+    private function isInvoiceSummaryRow(string $normalized): bool
+    {
+        foreach ([
+            'netto',
+            'summe',
+            'gesamt',
+            'mwst',
+            'ust',
+            'zahlbar',
+            'lieferung frei haus',
+        ] as $prefix) {
+            if (str_starts_with($normalized, $prefix)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isDocumentFurnitureRow(string $normalized): bool
+    {
+        foreach ([
+            'seite:',
+            'kunden nr.:',
+            'bestellung:',
+            'kd.ust-idnr.:',
+            'projekt nr.:',
+            'ust-idnr.:',
+            'lieferdatum:',
+            'datum:',
+            'musterfirma',
+            'softvertrieb',
+            'geschäftsführer:',
+            'tel.:',
+            'fax.:',
+            'iban:',
+            'swift code',
+            'amtsgericht',
+            'e-mail:',
+            'web:',
+            'blz:',
+            'konto:',
+            'firma',
+        ] as $prefix) {
+            if (str_starts_with($normalized, $prefix)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
