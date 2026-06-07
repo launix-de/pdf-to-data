@@ -241,6 +241,13 @@ final class CorpusExtractionTest extends TestCase
                                 self::assertSame((bool)$expectedValue, str_contains($actualDetailHtml, '<img'), sprintf('Mismatch for quotation position %s field %s', $position, (string)$key));
                                 continue;
                             }
+                            if ((string)$key === 'detail_html_first_raster_img_top_max') {
+                                $actualDetailHtml = (string)($actualByPosition[$position]['detail_html'] ?? '');
+                                $actualTop = $this->extractFirstRasterImageTop($actualDetailHtml);
+                                self::assertNotNull($actualTop, sprintf('Missing raster detail image for quotation position %s', $position));
+                                self::assertLessThanOrEqual((float)$expectedValue, $actualTop, sprintf('Raster detail image is too low for quotation position %s', $position));
+                                continue;
+                            }
                             self::assertArrayHasKey((string)$key, $actualByPosition[$position]);
                             self::assertSame($expectedValue, $actualByPosition[$position][(string)$key], sprintf('Mismatch for quotation position %s field %s', $position, (string)$key));
                         }
@@ -254,6 +261,25 @@ final class CorpusExtractionTest extends TestCase
                 }
             }
         }
+    }
+
+    private function extractFirstRasterImageTop(string $html): ?float
+    {
+        if (!preg_match_all('/<img\b[^>]*>/i', $html, $matches)) {
+            return null;
+        }
+
+        foreach ($matches[0] as $tag) {
+            if (!preg_match('/\bsrc="data:image\/(?:png|jpeg|jpg);/i', $tag)) {
+                continue;
+            }
+            if (!preg_match('/\bstyle="[^"]*\btop:([0-9.]+)px/i', $tag, $styleMatch)) {
+                continue;
+            }
+            return (float)$styleMatch[1];
+        }
+
+        return null;
     }
 
     private function normalizeText(string $text): string

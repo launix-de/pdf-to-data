@@ -118,7 +118,9 @@
                     "beschreibung_first": "PVC-SCHREINERARBEITEN",
                     "einzelpreis": 2027.87,
                     "menge": 1,
-                    "gesamt": 2027.87
+                    "gesamt": 2027.87,
+                    "detail_html_has_img": true,
+                    "detail_html_first_raster_img_top_max": 20
                 },
                 "8": {
                     "beschreibung_first": "Elemente/Profile [m]",

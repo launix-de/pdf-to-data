@@ -733,6 +733,7 @@ final class SalesDocumentExtractor
         $descriptionLines = [];
         $captureDescription = false;
         $detailStartTop = null;
+        $firstDetailTop = null;
 
         foreach ($blockRows as $row) {
             $texts = array_values(array_filter(array_map(
@@ -791,6 +792,9 @@ final class SalesDocumentExtractor
                 continue;
             }
 
+            if ($firstDetailTop === null) {
+                $firstDetailTop = (float)$row['top'];
+            }
             $descriptionLines[] = $joined;
         }
 
@@ -803,7 +807,9 @@ final class SalesDocumentExtractor
 
         $detailHtml = $this->buildPositionDetailHtml(
             $projectedElements,
-            $detailStartTop ?? ((float)$blockRows[0]['top'] + $this->estimateRowHeight($blockRows[0])),
+            $firstDetailTop !== null
+                ? max(0.0, $firstDetailTop - 2.0)
+                : ($detailStartTop ?? ((float)$blockRows[0]['top'] + $this->estimateRowHeight($blockRows[0]))),
             $blockEndTop
         );
         $detailHtml = $this->ensureDetailHtmlContainsDescriptionHeading($detailHtml, $description);
