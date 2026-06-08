@@ -804,6 +804,7 @@ final class SalesDocumentExtractor
 
         $description = $this->normalizeDescriptionLines($descriptionLines);
         $description = $this->restoreMissingDescriptionHeading($description);
+        $description = trim((string)strtok($description, "\n"));
 
         $detailHtml = $this->buildPositionDetailHtml(
             $projectedElements,
@@ -812,7 +813,6 @@ final class SalesDocumentExtractor
                 : ($detailStartTop ?? ((float)$blockRows[0]['top'] + $this->estimateRowHeight($blockRows[0]))),
             $blockEndTop
         );
-        $detailHtml = $this->ensureDetailHtmlContainsDescriptionHeading($detailHtml, $description);
 
         return [
             'position' => $position,

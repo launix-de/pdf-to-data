@@ -62,17 +62,19 @@
             },
             "line_items_by_position": {
                 "1": {
-                    "beschreibung_first": "PVC-SCHREINERARBEITEN",
+                    "beschreibung": "PVC-SCHREINERARBEITEN",
                     "einzelpreis": 764.8,
                     "menge": 1,
                     "gesamt": 764.8,
                     "detail_html_has_img": true,
                     "detail_html_contains": [
-                        "PVC-SCHREINERARBEITEN",
+                        "Produktnummer/Produ",
+                        "Küche",
                         "Transportleiste",
                         "DÜBELBOHRUNG LINKS+RECHTS"
                     ],
                     "detail_html_not_contains": [
+                        "detail-heading",
                         "PamProject",
                         "Angebot - Nr.",
                         "Ausdruckdatum:"
