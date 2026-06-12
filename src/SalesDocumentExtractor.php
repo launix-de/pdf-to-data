@@ -814,17 +814,22 @@ final class SalesDocumentExtractor
             $blockEndTop
         );
 
-        return [
+        $result = [
             'position' => $position,
             'beschreibung' => $description,
             'einzelpreis' => $unitPrice,
             'menge' => $quantity,
             'einheit' => $unit ?? null,
             'gesamt' => $netValue,
-            'mwst' => $vatPercent,
             'brutto' => $grossValue,
             'detail_html' => $detailHtml,
         ];
+
+        if ($vatPercent !== null && (float)$vatPercent !== 0.0) {
+            $result['mwst'] = $vatPercent;
+        }
+
+        return $result;
     }
 
     /**
